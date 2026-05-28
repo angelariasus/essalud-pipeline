@@ -1,9 +1,6 @@
-import json
-import os
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
-from typing import Dict, Any, Iterator
 from pathlib import Path
 
 from app.config.settings import settings

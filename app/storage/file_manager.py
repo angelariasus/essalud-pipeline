@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Dict, Any, Optional, Iterator
+from typing import Dict, Any, Iterator
 from app.audit.logger import setup_logger
 
 logger = setup_logger("ocds_framework.storage.file_manager")

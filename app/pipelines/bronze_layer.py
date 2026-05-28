@@ -35,32 +35,32 @@ class BronzePipeline:
         logger.info(msg)
         
         count = 0
-        for summary in self.targeted_extractor.paginate_records(ruc, target_year=year):
+        for record in self.targeted_extractor.paginate_records(ruc, target_year=year):
             if limit > 0 and count >= limit:
                 logger.warning(f"Límite {limit} alcanzado. Terminando ingesta.")
                 break
-                
-            if not summary.ocid:
+
+            ocid = record.get("ocid")
+            if not ocid:
                 continue
-                
+
             try:
-                detail = self.targeted_extractor.get_record_detail(summary.ocid)
-                # Guardar en local siempre
-                path_suffix = f"records/{ruc}/{year}" if year else f"records/{ruc}"
+                # El record ya viene proyectado desde paginate_records (sin 2da llamada HTTP).
+                path_suffix = f"records/{ruc}/{year}" if year else f"records/{ruc}/unknown"
                 local_path = self.local_storage.save_json(
-                    data=detail, 
-                    path_suffix=path_suffix, 
-                    filename=summary.ocid
+                    data=record,
+                    path_suffix=path_suffix,
+                    filename=ocid
                 )
-                
+
                 # Subir a R2 si está configurado
                 if self.cloud_storage:
                     object_key = f"{path_suffix}/{local_path.name}"
                     self.cloud_storage.upload_file(local_path, object_key)
-                    
+
                 count += 1
             except Exception as e:
-                logger.error(f"Falló ingesta del OCID {summary.ocid}: {e}")
+                logger.error(f"Falló ingesta del OCID {ocid}: {e}")
                 
         logger.info(f"== Ingesta Targeted Finalizada. Registros procesados: {count} ==")
 

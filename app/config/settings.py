@@ -20,6 +20,8 @@ class Settings:
     PROJECT_ROOT: Path = PROJECT_ROOT
     DATA_DIR: Path = PROJECT_ROOT / "data"
     BRONZE_DIR: Path = Path(os.getenv("OCDS_BRONZE_DIR", str(DATA_DIR / "bronze")))
+    SILVER_DIR: Path = Path(os.getenv("OCDS_SILVER_DIR", str(DATA_DIR / "silver")))
+    EXTRA_DATA_DIR: Path = Path(os.getenv("OCDS_EXTRA_DATA_DIR", str(PROJECT_ROOT / "extra-data")))
     AUDIT_DIR: Path = DATA_DIR / "audit"
     EXECUTIONS_DIR: Path = AUDIT_DIR / "executions"
     QUALITY_CHECKS_DIR: Path = AUDIT_DIR / "quality_checks"
@@ -30,7 +32,10 @@ class Settings:
     R2_ACCESS_KEY: str = os.getenv("OCDS_R2_ACCESS_KEY", "")
     R2_SECRET_KEY: str = os.getenv("OCDS_R2_SECRET_KEY", "")
     R2_BUCKET_NAME: str = os.getenv("OCDS_R2_BUCKET_NAME", "essalud-bronze-lake")
-    
+
+    # Data Warehouse (capa Gold - SQL Server). La cadena lleva credenciales: definir en .env.
+    DW_CONN_STRING: str = os.getenv("OCDS_DW_CONN_STRING", "")
+
     LOG_LEVEL: str = os.getenv("OCDS_LOG_LEVEL", "INFO")
     MAX_RETRIES: int = int(os.getenv("OCDS_MAX_RETRIES", "5"))
     BACKOFF_FACTOR: float = float(os.getenv("OCDS_BACKOFF_FACTOR", "0.5"))

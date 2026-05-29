@@ -1,59 +1,50 @@
 """
-Carga las dimensiones y la tabla de hechos en el Data Warehouse (SQL Server).
+Carga las dimensiones y la Fact en el Data Warehouse (SQL Server) con Spark+JDBC.
 
-Orden de carga (respeta dependencias FK):
-1. execute_ddl()                     → crea esquema, precarga Dim_Tiempo y 25 Dim_Ubigeo depts.
-2. load_dim_ubigeo_distritos()       → INSERT nivel DISTRITO (depende de Dim_Ubigeo)
-3. load_dim_entidad()                → depende de Dim_Ubigeo
-4. load_dim_medicamento()            → independiente
-5. load_dim_proveedor()              → independiente
-6. load_fact()                       → depende de todas las Dims
+Estrategia transaccional (fail-safe), conforme al plan de migración:
+  1. `execute_ddl` reconstruye el esquema de producción (oro.*) y crea el esquema
+     [stg] + el stored procedure de carga atómica.
+  2. Spark escribe cada DataFrame por JDBC a tablas STAGING (`stg.*`), creadas/
+     sobrescritas automáticamente. Si una escritura falla, producción no se toca.
+  3. `call_load_procedure` ejecuta `oro.usp_Load_From_Staging`, que mueve los
+     datos a producción dentro de UNA transacción (atómica, con ROLLBACK ante error).
 
-Los SK se asignan DETERMINÍSTICAMENTE en Python (ver dim_resolver). Se usa
-SET IDENTITY_INSERT ON para insertar con SK explícitos.
+Las SK llegan resueltas desde Spark (deterministas); el procedure usa
+SET IDENTITY_INSERT para insertarlas explícitamente (ver dim_resolver).
 """
 import re
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
-import pandas as pd
+from pyspark.sql import DataFrame
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 
 from app.audit.logger import setup_logger
 from app.config.settings import settings
 
 logger = setup_logger("ocds_framework.loaders.dw_loader")
 
-# Columnas de la Fact que tienen DEFAULT 0 en el DDL y no vienen del DataFrame.
-_FACT_ZERO_COLUMNS = [
-    "Monto_Reduccion",
-    "Monto_Prorroga",
-    "Monto_Complementario",
-]
+_JDBC_DRIVER = "com.microsoft.sqlserver.jdbc.SQLServerDriver"
+_LOAD_PROCEDURE = "oro.usp_Load_From_Staging"
 
-# Columnas de la Fact que tienen DEFAULT NULL y no vienen del DataFrame.
-_FACT_NULL_COLUMNS = [
-    "Codigo_Convocatoria",
-    "N_Cod_Contrato",
-    "Num_Contrato",
-    "Tiene_Resolucion",
-    "Nro_Orden_Compra",
-    "Tipo_Orden",
-    "Estado_Contratacion_OC",
-]
+# Mapa clave-dimensión -> tabla staging destino (esquema stg).
+_STAGING_TABLES = {
+    "dim_entidad": "stg.Dim_Entidad_Compradora",
+    "dim_medicamento": "stg.Dim_Medicamento",
+    "dim_proveedor": "stg.Dim_Proveedor",
+    "fact": "stg.Fact_Ordenes_Y_Contratos",
+}
 
-_SCHEMA = "oro"
+# DDL de staging + stored procedure (junto al DDL del star schema).
+STAGING_DDL_PATH = settings.PROJECT_ROOT / "star-schema" / "EsSalud_Staging_DDL.sql"
 
 
 def create_sqlalchemy_engine() -> Engine:
-    """Crea el engine SQLAlchemy desde la cadena de conexión configurada."""
+    """Crea el engine SQLAlchemy/pyodbc (para DDL y el stored procedure de carga)."""
     conn_str = settings.DW_CONN_STRING
     if not conn_str:
-        raise ValueError(
-            "OCDS_DW_CONN_STRING no está configurada. "
-            "Revisa tu archivo .env."
-        )
+        raise ValueError("OCDS_DW_CONN_STRING no está configurada. Revisa tu archivo .env.")
     logger.info("Creando engine SQLAlchemy para DW.")
     return create_engine(conn_str)
 
@@ -67,7 +58,7 @@ def _split_sql_batches(sql: str):
 
 
 def execute_ddl(engine: Engine, ddl_path: Path) -> None:
-    """Ejecuta el script DDL completo (idempotente) con AUTOCOMMIT."""
+    """Ejecuta un script SQL completo (idempotente) con AUTOCOMMIT, lote por lote."""
     logger.info(f"Ejecutando DDL desde: {ddl_path}")
     if not ddl_path.exists():
         raise FileNotFoundError(f"Archivo DDL no encontrado: {ddl_path}")
@@ -75,118 +66,114 @@ def execute_ddl(engine: Engine, ddl_path: Path) -> None:
     sql = ddl_path.read_text(encoding="utf-8")
     batches = list(_split_sql_batches(sql))
     logger.info(f"DDL dividido en {len(batches)} lotes.")
-
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         for i, batch in enumerate(batches, start=1):
             logger.debug(f"Ejecutando lote DDL {i}/{len(batches)}...")
             conn.execute(text(batch))
-
     logger.info("DDL ejecutado correctamente.")
 
 
-def _identity_insert_sql(table: str, on: bool) -> str:
-    """Genera SET IDENTITY_INSERT schema.table ON|OFF."""
-    estado = "ON" if on else "OFF"
-    return f"SET IDENTITY_INSERT {_SCHEMA}.{table} {estado}"
+def _derive_jdbc_from_conn(conn_str: str):
+    """Deriva (url, user, password) JDBC desde la cadena SQLAlchemy/pyodbc del DW."""
+    u = make_url(conn_str)
+    host = u.host or "localhost"
+    port = f":{u.port}" if u.port else ""
+    db = u.database or ""
+    url = (
+        f"jdbc:sqlserver://{host}{port};databaseName={db}"
+        ";encrypt=true;trustServerCertificate=true"
+    )
+    return url, (u.username or ""), (u.password or "")
 
 
-def _load_dim(
-    engine: Engine,
-    table: str,
-    df: pd.DataFrame,
-    *,
-    use_identity_insert: bool = True,
-    chunksize: int = 100,
-) -> None:
-    """Carga un DataFrame en una dimensión con IDENTITY_INSERT si es necesario."""
-    logger.info(f"Cargando {len(df)} filas en {_SCHEMA}.{table}...")
-    # method='multi' con muchas columnas excede el límite de 2100 parámetros de SQL Server.
-    # Se usa method=None (INSERT individuales por fila) con chunksize pequeño.
-    with engine.begin() as conn:
-        if use_identity_insert:
-            conn.execute(text(_identity_insert_sql(table, True)))
-        df.to_sql(
-            table,
-            conn,
-            schema=_SCHEMA,
-            if_exists="append",
-            index=False,
-            method=None,
-            chunksize=chunksize,
+def _jdbc_conn():
+    """
+    Conexión JDBC para Spark. Usa las variables OCDS_DW_JDBC_* si están definidas;
+    si no, las deriva de OCDS_DW_CONN_STRING (el .env ya configurado del usuario),
+    evitando duplicar credenciales.
+    """
+    if settings.DW_JDBC_URL:
+        return settings.DW_JDBC_URL, settings.DW_JDBC_USER, settings.DW_JDBC_PASSWORD
+    if settings.DW_CONN_STRING:
+        return _derive_jdbc_from_conn(settings.DW_CONN_STRING)
+    return "", "", ""
+
+
+def _jdbc_write_options() -> Dict[str, str]:
+    """Opciones comunes de escritura JDBC al DW."""
+    url, user, password = _jdbc_conn()
+    return {
+        "url": url,
+        "user": user,
+        "password": password,
+        "driver": _JDBC_DRIVER,
+        "batchsize": str(settings.DW_JDBC_BATCHSIZE),
+    }
+
+
+def write_staging_jdbc(df: DataFrame, table: str, num_partitions: int = 4) -> None:
+    """Escribe un DataFrame a una tabla staging por JDBC (overwrite, en lotes)."""
+    url, _, _ = _jdbc_conn()
+    if not url:
+        raise ValueError(
+            "Sin conexión al DW: define OCDS_DW_JDBC_URL u OCDS_DW_CONN_STRING en tu .env. "
+            "Para la escritura Spark→DW define además OCDS_SPARK_JARS_PACKAGES (driver mssql-jdbc)."
         )
-        if use_identity_insert:
-            conn.execute(text(_identity_insert_sql(table, False)))
-    logger.info(f"{_SCHEMA}.{table} cargado correctamente.")
+    n = df.rdd.getNumPartitions()
+    writer = df.coalesce(min(n, num_partitions)) if n > num_partitions else df
+    logger.info(f"Escribiendo staging por JDBC -> {table}")
+    (
+        writer.write.format("jdbc")
+        .options(**_jdbc_write_options())
+        .option("dbtable", table)
+        .mode("overwrite")
+        .save()
+    )
 
 
-def load_dim_entidad(engine: Engine, dim_df: pd.DataFrame) -> None:
-    """Carga la dimensión de entidades compradoras."""
-    if dim_df.empty:
-        logger.warning("No hay entidades que cargar en Dim_Entidad_Compradora.")
-        return
-    _load_dim(engine, "Dim_Entidad_Compradora", dim_df)
+def write_all_staging(dims: Dict[str, DataFrame]) -> None:
+    """Escribe todas las dimensiones y la Fact a sus tablas staging."""
+    for key, table in _STAGING_TABLES.items():
+        df = dims.get(key)
+        if df is None:
+            logger.warning(f"Sin DataFrame para '{key}'; se omite staging {table}.")
+            continue
+        write_staging_jdbc(df, table)
 
 
-def load_dim_medicamento(engine: Engine, dim_df: pd.DataFrame) -> None:
-    """Carga la dimensión de medicamentos."""
-    if dim_df.empty:
-        logger.warning("No hay medicamentos que cargar en Dim_Medicamento.")
-        return
-    _load_dim(engine, "Dim_Medicamento", dim_df)
-
-
-def load_dim_proveedor(engine: Engine, dim_df: pd.DataFrame) -> None:
-    """Carga la dimensión de proveedores."""
-    if dim_df.empty:
-        logger.warning("No hay proveedores que cargar en Dim_Proveedor.")
-        return
-    _load_dim(engine, "Dim_Proveedor", dim_df)
-
-
-def load_fact(engine: Engine, fact_df: pd.DataFrame, chunksize: int = 500) -> None:
-    """Carga la tabla de hechos (sin IDENTITY_INSERT pues SK_Hecho es auto)."""
-    if fact_df.empty:
-        logger.warning("No hay filas que cargar en Fact_Ordenes_Y_Contratos.")
-        return
-
-    df = fact_df.copy()
-    for col in _FACT_ZERO_COLUMNS:
-        if col not in df.columns:
-            df[col] = 0
-    for col in _FACT_NULL_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-
-    logger.info(f"Cargando {len(df)} filas en {_SCHEMA}.Fact_Ordenes_Y_Contratos...")
+def call_load_procedure(engine: Engine, procedure: str = _LOAD_PROCEDURE) -> None:
+    """Ejecuta el stored procedure de carga atómica Staging -> Producción."""
+    logger.info(f"Ejecutando carga atómica: EXEC {procedure}")
     with engine.begin() as conn:
-        df.to_sql(
-            "Fact_Ordenes_Y_Contratos",
-            conn,
-            schema=_SCHEMA,
-            if_exists="append",
-            index=False,
-            method=None,
-            chunksize=chunksize,
-        )
-    logger.info("Fact_Ordenes_Y_Contratos cargada correctamente.")
+        conn.exec_driver_sql(f"EXEC {procedure}")
+    logger.info("Carga atómica (Staging -> Producción) completada.")
 
 
 def load_all(
-    engine: Engine,
-    dims: Dict[str, pd.DataFrame],
+    dims: Dict[str, DataFrame],
     ddl_path: Path,
+    staging_ddl_path: Optional[Path] = None,
+    engine: Optional[Engine] = None,
 ) -> None:
     """
-    Orquesta la carga completa del DW respetando dependencias FK.
+    Orquesta la carga completa del DW: DDL → staging (JDBC) → carga atómica (SP).
 
-    Dim_Ubigeo no se carga aquí: a nivel Red se usan los 25 departamentos
-    precargados por el DDL (FK_Ubigeo y FK_Ubigeo_Item apuntan a SK 1-25).
+    Args:
+        dims: dict con DataFrames de Spark (dim_entidad, dim_medicamento,
+              dim_proveedor, fact).
+        ddl_path: ruta al DDL del star schema (reconstruye producción).
+        staging_ddl_path: ruta al DDL de staging + stored procedure
+            (default: STAGING_DDL_PATH).
+        engine: engine SQLAlchemy opcional (si no, se crea y se cierra aquí).
     """
-    execute_ddl(engine, ddl_path)
-
-    load_dim_entidad(engine, dims.get("dim_entidad", pd.DataFrame()))
-    load_dim_medicamento(engine, dims.get("dim_medicamento", pd.DataFrame()))
-    load_dim_proveedor(engine, dims.get("dim_proveedor", pd.DataFrame()))
-    load_fact(engine, dims.get("fact", pd.DataFrame()))
-
-    logger.info("=== Carga completa del Data Warehouse finalizada ===")
+    owns_engine = engine is None
+    engine = engine or create_sqlalchemy_engine()
+    try:
+        execute_ddl(engine, ddl_path)
+        execute_ddl(engine, staging_ddl_path or STAGING_DDL_PATH)
+        write_all_staging(dims)
+        call_load_procedure(engine)
+        logger.info("=== Carga completa del Data Warehouse finalizada ===")
+    finally:
+        if owns_engine:
+            engine.dispose()

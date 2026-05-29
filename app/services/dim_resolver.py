@@ -1,32 +1,36 @@
 """
-Construye las dimensiones de la capa Oro y resuelve las claves foráneas de la Fact.
+Construye las dimensiones de la capa Oro y resuelve las FK de la Fact con Spark.
 
-Decisión arquitectónica: los SK se asignan de forma DETERMINÍSTICA en Python
-(no por IDENTITY de SQL Server). Esto permite resolver todas las FK sin una
-conexión a la BD y validar el pipeline completo offline. El dw_loader (Paso 8)
-inserta con SET IDENTITY_INSERT ON usando estos SK.
+Reescritura de la versión pandas a la API de DataFrames de Spark:
+  - Las Surrogate Keys se generan con `row_number()` (forma distribuida y
+    determinística, en lugar de un contador en memoria).
+  - El Fuzzy Matching se ejecuta vía Pandas UDFs vectorizados con Broadcast de
+    los maestros (Petitorio, Establecimientos).
+  - Las FK de la Fact se resuelven por `join` contra los mapas de cada dimensión.
 
 Las dimensiones precargadas por el DDL (Dim_Tiempo, Dim_Ubigeo departamentos,
-Dim_Tipo_Proceso) NO se regeneran aquí; sus SK se replican como constantes
-ancladas al orden de inserción del DDL.
+Dim_Tipo_Proceso) NO se regeneran; sus SK se replican como constantes ancladas
+al orden de inserción del DDL. La carga usa SET IDENTITY_INSERT (ver dw_loader).
 """
-from typing import Dict, List, Optional, Tuple
+from __future__ import annotations
+
+from typing import Dict, Tuple
 
 import pandas as pd
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
+from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+from pyspark.sql.window import Window
 
 from app.audit.logger import setup_logger
 from app.loaders.master_loader import normalize_text
-from app.utils.fuzzy_matcher import (
-    match_medicamento,
-    match_red_asistencial,
-)
+from app.utils.fuzzy_matcher import make_match_medicamento_udf, make_match_red_udf
 
 logger = setup_logger("ocds_framework.services.dim_resolver")
 
 RUC_ESSALUD = "20131257750"
 
 # ── SK anclados al DDL ───────────────────────────────────────────────────────
-# Dim_Ubigeo: sentinel -1 + 25 departamentos con IDENTITY(1,1) en el orden del DDL.
 DEPARTAMENTO_SK: Dict[str, int] = {
     "AMAZONAS": 1, "ANCASH": 2, "APURIMAC": 3, "AREQUIPA": 4, "AYACUCHO": 5,
     "CAJAMARCA": 6, "CALLAO": 7, "CUSCO": 8, "HUANCAVELICA": 9, "HUANUCO": 10,
@@ -35,7 +39,6 @@ DEPARTAMENTO_SK: Dict[str, int] = {
     "PUNO": 21, "SAN MARTIN": 22, "TACNA": 23, "TUMBES": 24, "UCAYALI": 25,
 }
 
-# Dim_Tipo_Proceso: SK por procurementMethodDetails normalizado (orden del DDL).
 TIPO_PROCESO_SK: Dict[str, int] = {
     "LICITACION PUBLICA": 1,
     "CONCURSO PUBLICO": 2,
@@ -45,311 +48,306 @@ TIPO_PROCESO_SK: Dict[str, int] = {
     "COMPARACION DE PRECIOS": 7,
     "CONTRATACION DIRECTA": 8,
 }
-SK_TIPO_PROCESO_CD = 8           # CONTRATACION DIRECTA (BIEN)
+SK_TIPO_PROCESO_CD = 8
 SK_TIPO_PROCESO_DESCONOCIDO = 12
 
 # Sentinels (precargados por el DDL).
 SK_SENTINEL = -1
 SK_MED_NO_FARMA = -1
 SK_MED_HISTORICO = -2
-SK_MED_PAQUETE = -3
-SK_MED_GENERICO = -4
 SK_TIEMPO_NULO = -1
 
+PETITORIO_COLS = [
+    "N_ITEM", "CODIGO_SAP", "DENOMINACION_DCI", "ESPECIFICACIONES_TECNICAS",
+    "UNIDAD_MANEJO", "RESTRICCION_USO", "ESPECIALIDAD_AUTORIZADA", "INDICACIONES",
+    "DENOMINACION_DCI_NORM",
+]
 
-def _to_sk_tiempo(value) -> int:
-    """Convierte una fecha (Timestamp/NaT) al SK YYYYMMDD; NaT -> -1."""
-    if value is None or pd.isna(value):
-        return SK_TIEMPO_NULO
-    return int(value.strftime("%Y%m%d"))
+
+@F.udf(StringType())
+def _norm_udf(value):
+    """normalize_text como UDF (mayúsculas, sin tildes, espacios colapsados)."""
+    return normalize_text(value)
 
 
-def _to_date(value):
-    """Timestamp -> date (para columnas DATE del DW); NaT -> None."""
-    if value is None or pd.isna(value):
-        return None
-    return value.date()
+def _sk_tiempo(col_name: str):
+    """Fecha DATE -> SK_Tiempo (YYYYMMDD int); NULL -> -1."""
+    return F.coalesce(
+        F.date_format(F.col(col_name), "yyyyMMdd").cast("int"), F.lit(SK_TIEMPO_NULO)
+    )
 
 
 # ── Dim_Proveedor ────────────────────────────────────────────────────────────
-def build_dim_proveedor(flat_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]]:
-    """
-    Una fila por RUC de proveedor único (no nulo). Devuelve el DataFrame de la
-    dimensión y el mapa ruc -> SK_Proveedor.
-    """
+def build_dim_proveedor(flat_df: DataFrame) -> Tuple[DataFrame, DataFrame]:
+    """Una fila por RUC de proveedor único. Devuelve (dimensión, mapa ruc->SK)."""
+    w_pick = Window.partitionBy("ruc_proveedor").orderBy(
+        F.col("nombre_proveedor").asc_nulls_last()
+    )
     pares = (
-        flat_df[["ruc_proveedor", "nombre_proveedor"]]
-        .dropna(subset=["ruc_proveedor"])
-        .drop_duplicates(subset=["ruc_proveedor"])
+        flat_df.where(F.col("ruc_proveedor").isNotNull())
+        .withColumn("_rn", F.row_number().over(w_pick))
+        .where(F.col("_rn") == 1)
+        .select("ruc_proveedor", "nombre_proveedor")
     )
 
-    rows, ruc_to_sk = [], {}
-    for sk, (_, r) in enumerate(pares.iterrows(), start=1):
-        ruc = r["ruc_proveedor"]
-        nombre = r["nombre_proveedor"] or "SIN NOMBRE"
-        es_consorcio = "CONSORCIO" in (normalize_text(nombre) or "")
-        if es_consorcio:
-            tipo = "Consorcio"
-        elif ruc.startswith("20"):
-            tipo = "Persona Juridica"
-        elif ruc.startswith("10"):
-            tipo = "Persona Natural"
-        else:
-            tipo = None
-        ruc_to_sk[ruc] = sk
-        rows.append(
-            {
-                "SK_Proveedor": sk,
-                "RUC_Proveedor": ruc[:11],
-                "Nombre_Proveedor": nombre[:250],
-                "Tipo_Proveedor": tipo,
-                "Es_Consorcio": int(es_consorcio),
-            }
-        )
+    nombre = F.when(
+        (F.col("nombre_proveedor").isNull()) | (F.col("nombre_proveedor") == ""),
+        F.lit("SIN NOMBRE"),
+    ).otherwise(F.col("nombre_proveedor"))
 
-    logger.info(f"Dim_Proveedor: {len(rows)} proveedores.")
-    return pd.DataFrame(rows), ruc_to_sk
+    base = (
+        pares
+        .withColumn("_nombre", nombre)
+        .withColumn("_es_consorcio", F.upper(F.col("_nombre")).contains("CONSORCIO"))
+        .withColumn("SK_Proveedor", F.row_number().over(Window.orderBy("ruc_proveedor")))
+    )
+    tipo = (
+        F.when(F.col("_es_consorcio"), F.lit("Consorcio"))
+        .when(F.col("ruc_proveedor").startswith("20"), F.lit("Persona Juridica"))
+        .when(F.col("ruc_proveedor").startswith("10"), F.lit("Persona Natural"))
+        .otherwise(F.lit(None))
+    )
+    dim = base.select(
+        "SK_Proveedor",
+        F.substring("ruc_proveedor", 1, 11).alias("RUC_Proveedor"),
+        F.substring(F.col("_nombre"), 1, 250).alias("Nombre_Proveedor"),
+        tipo.alias("Tipo_Proveedor"),
+        F.col("_es_consorcio").cast("int").alias("Es_Consorcio"),
+    )
+    prov_map = base.select("ruc_proveedor", "SK_Proveedor")
+    logger.info(f"Dim_Proveedor: {dim.count()} proveedores.")
+    return dim, prov_map
 
 
 # ── Dim_Medicamento ──────────────────────────────────────────────────────────
-def build_dim_medicamento(
-    flat_df: pd.DataFrame, petitorio_df: pd.DataFrame
-) -> Tuple[pd.DataFrame, Dict[str, int]]:
+def _petitorio_sdf(spark, petitorio_df: pd.DataFrame) -> DataFrame:
     """
-    Una fila por descripción SEACE única clasificada como medicamento (EXACTO o
-    FUZZY). Las DUDOSO/HISTORICO no generan fila: se mapean a sentinels.
+    Convierte el Petitorio (pandas) a Spark DF de strings, deduplicado por DCI norm.
 
-    Devuelve el DataFrame de la dimensión y el mapa descripcion_norm -> SK.
+    Cuando varias filas comparten DENOMINACION_DCI_NORM (frecuente: distintas
+    presentaciones), se conserva la de MAYOR índice original, replicando el
+    "last-wins" del dict de la versión pandas de forma determinística.
     """
-    choices = petitorio_df["DENOMINACION_DCI_NORM"].dropna().tolist()
-    # Índice DCI_NORM -> fila del petitorio para copiar atributos del match.
-    pet_by_dci = {
-        row["DENOMINACION_DCI_NORM"]: row
-        for _, row in petitorio_df.iterrows()
-        if row["DENOMINACION_DCI_NORM"]
-    }
-
-    descripciones = flat_df["descripcion_item"].dropna().unique()
-    rows, desc_to_sk = [], {}
-    sk = 1
-    for desc in descripciones:
-        norm = normalize_text(desc)
-        if not norm:
-            continue
-        res = match_medicamento(desc, choices)
-        metodo = res["metodo"]
-
-        if metodo in ("EXACTO", "FUZZY"):
-            pet = pet_by_dci.get(res["dci"], {})
-            n_item = pet.get("N_ITEM")
-            try:
-                n_item = int(n_item) if n_item not in (None, "") else None
-            except (ValueError, TypeError):
-                n_item = None
-            rows.append(
-                {
-                    "SK_Medicamento": sk,
-                    "N_Item_Petitorio": n_item,
-                    "Codigo_SAP": (pet.get("CODIGO_SAP") or None),
-                    "Denominacion_DCI": (pet.get("DENOMINACION_DCI") or res["dci"])[:300],
-                    "Especificaciones_Tecnicas": _trunc(pet.get("ESPECIFICACIONES_TECNICAS"), 500),
-                    "Unidad_De_Manejo": _trunc(pet.get("UNIDAD_MANEJO"), 20),
-                    "Restriccion_Uso": _trunc(pet.get("RESTRICCION_USO"), 50),
-                    "Especialidad_Autorizada": _trunc(pet.get("ESPECIALIDAD_AUTORIZADA"), 300),
-                    "Indicaciones_Observaciones": _trunc(pet.get("INDICACIONES"), 1000),
-                    "En_Petitorio_2026": 1,
-                    "Descripcion_SEACE_Original": desc[:600],
-                    "Score_Fuzzy_Match": round(res["score"], 2),
-                    "Metodo_Clasificacion": metodo,
-                }
-            )
-            desc_to_sk[norm] = sk
-            sk += 1
-        elif metodo == "HISTORICO":
-            desc_to_sk[norm] = SK_MED_HISTORICO
-        else:  # DUDOSO
-            desc_to_sk[norm] = SK_MED_NO_FARMA
-
-    clasificados = len(rows)
-    logger.info(
-        f"Dim_Medicamento: {clasificados} clasificados (EXACTO/FUZZY) de "
-        f"{len(descripciones)} descripciones únicas."
+    pet = petitorio_df.reindex(columns=PETITORIO_COLS).copy()
+    pet = pet.where(pd.notnull(pet), None)
+    rows = [tuple(r) + (i,) for i, r in enumerate(pet.values.tolist())]
+    schema = StructType(
+        [StructField(c, StringType()) for c in PETITORIO_COLS]
+        + [StructField("_ord", IntegerType())]
     )
-    return pd.DataFrame(rows), desc_to_sk
+    sdf = spark.createDataFrame(rows, schema).where(F.col("DENOMINACION_DCI_NORM").isNotNull())
+    w = Window.partitionBy("DENOMINACION_DCI_NORM").orderBy(F.col("_ord").desc())
+    return sdf.withColumn("_rn", F.row_number().over(w)).where(F.col("_rn") == 1).drop("_rn", "_ord")
+
+
+def build_dim_medicamento(
+    flat_df: DataFrame, petitorio_df: pd.DataFrame
+) -> Tuple[DataFrame, DataFrame]:
+    """
+    Una fila por descripción SEACE normalizada clasificada como medicamento
+    (EXACTO/FUZZY). Devuelve (dimensión, mapa norm->FK_Medicamento) donde el mapa
+    también incluye HISTORICO (-2); DUDOSO queda fuera (se resuelve a -1 en la Fact).
+    """
+    spark = flat_df.sparkSession
+    choices = petitorio_df["DENOMINACION_DCI_NORM"].dropna().tolist()
+    med_udf = make_match_medicamento_udf(spark.sparkContext.broadcast(choices))
+
+    descs = (
+        flat_df.select("descripcion_item")
+        .where(F.col("descripcion_item").isNotNull())
+        .distinct()
+        .withColumn("norm", _norm_udf(F.col("descripcion_item")))
+        .where(F.col("norm").isNotNull())
+    )
+    matched = descs.withColumn("m", med_udf(F.col("descripcion_item"))).select(
+        "descripcion_item", "norm", "m.dci", "m.score", "m.metodo"
+    )
+    # Grano: una fila por descripción normalizada (colapsa variantes crudas).
+    matched1 = (
+        matched.withColumn(
+            "_rn",
+            F.row_number().over(
+                Window.partitionBy("norm").orderBy(F.col("descripcion_item").asc_nulls_last())
+            ),
+        )
+        .where(F.col("_rn") == 1)
+        .drop("_rn")
+    )
+
+    pet_sdf = _petitorio_sdf(spark, petitorio_df)
+    em = matched1.where(F.col("metodo").isin("EXACTO", "FUZZY"))
+    joined = (
+        em.join(pet_sdf, em["dci"] == pet_sdf["DENOMINACION_DCI_NORM"], "left")
+        .withColumn("SK_Medicamento", F.row_number().over(Window.orderBy("norm")))
+    )
+
+    dim = joined.select(
+        "SK_Medicamento",
+        F.col("N_ITEM").cast("int").alias("N_Item_Petitorio"),
+        F.col("CODIGO_SAP").alias("Codigo_SAP"),
+        F.substring(F.coalesce(F.col("DENOMINACION_DCI"), F.col("dci")), 1, 300).alias("Denominacion_DCI"),
+        F.substring(F.col("ESPECIFICACIONES_TECNICAS"), 1, 500).alias("Especificaciones_Tecnicas"),
+        F.substring(F.col("UNIDAD_MANEJO"), 1, 20).alias("Unidad_De_Manejo"),
+        F.substring(F.col("RESTRICCION_USO"), 1, 50).alias("Restriccion_Uso"),
+        F.substring(F.col("ESPECIALIDAD_AUTORIZADA"), 1, 300).alias("Especialidad_Autorizada"),
+        F.substring(F.col("INDICACIONES"), 1, 1000).alias("Indicaciones_Observaciones"),
+        F.lit(1).alias("En_Petitorio_2026"),
+        F.substring(F.col("descripcion_item"), 1, 600).alias("Descripcion_SEACE_Original"),
+        F.round(F.col("score"), 2).alias("Score_Fuzzy_Match"),
+        F.col("metodo").alias("Metodo_Clasificacion"),
+    )
+
+    fk_real = joined.select("norm", F.col("SK_Medicamento").alias("fk_medicamento"))
+    fk_hist = matched1.where(F.col("metodo") == "HISTORICO").select(
+        "norm", F.lit(SK_MED_HISTORICO).alias("fk_medicamento")
+    )
+    desc_sk_df = fk_real.unionByName(fk_hist)
+
+    logger.info(f"Dim_Medicamento: {dim.count()} clasificados (EXACTO/FUZZY).")
+    return dim, desc_sk_df
 
 
 # ── Dim_Entidad_Compradora (nivel Red) ───────────────────────────────────────
-def _resolve_red_map(flat_df: pd.DataFrame, red_choices: List[str]) -> Dict[str, Optional[str]]:
-    """Mapa red_candidato -> Red canónica del Excel (cacheado por candidato único)."""
-    cand_to_red: Dict[str, Optional[str]] = {}
-    for cand in flat_df["red_candidato"].dropna().unique():
-        cand_to_red[cand] = match_red_asistencial(cand, red_choices)["red"]
-    return cand_to_red
-
-
 def build_dim_entidad(
-    flat_df: pd.DataFrame, establecimientos_df: pd.DataFrame
-) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, Optional[str]]]:
+    flat_df: DataFrame, establecimientos_df: pd.DataFrame
+) -> Tuple[DataFrame, DataFrame]:
     """
-    Una fila por Red Asistencial presente en los datos. FK_Ubigeo apunta al
-    departamento dominante de la Red (SK del departamento precargado).
-
-    Devuelve: (DataFrame dimensión, mapa red_canónica -> SK_Entidad,
-    mapa red_candidato -> red_canónica).
+    Una fila por Red Asistencial presente. FK_Ubigeo apunta al departamento
+    dominante de la Red. Devuelve (dimensión, mapa red_candidato->red_canónica).
     """
+    spark = flat_df.sparkSession
     red_choices = [
         r for r in establecimientos_df["RED_NORM"].dropna().unique()
         if r not in ("RED", "RED ASISTENCIAL")
     ]
-    cand_to_red = _resolve_red_map(flat_df, red_choices)
+    red_udf = make_match_red_udf(spark.sparkContext.broadcast(red_choices))
 
-    # Departamento dominante por Red (mode de DPTO de sus establecimientos).
+    cand_red = (
+        flat_df.select("red_candidato")
+        .where(F.col("red_candidato").isNotNull())
+        .distinct()
+        .withColumn("m", red_udf(F.col("red_candidato")))
+        .select("red_candidato", F.col("m.red").alias("red"))
+    )
+
+    # Departamento dominante por Red (mode) -> FK_Ubigeo (pandas, datos pequeños).
     est = establecimientos_df.copy()
     est["DPTO_NORM"] = est["DPTO"].map(normalize_text)
-    red_to_depto: Dict[str, str] = {}
+    fk_rows = []
     for red, grp in est.groupby("RED_NORM"):
         modes = grp["DPTO_NORM"].mode()
-        if len(modes):
-            red_to_depto[red] = modes.iloc[0]
+        depto = modes.iloc[0] if len(modes) else None
+        fk_rows.append((red, int(DEPARTAMENTO_SK.get(depto, SK_SENTINEL))))
+    fk_df = spark.createDataFrame(fk_rows, ["red", "fk_ubigeo"]) if fk_rows else \
+        spark.createDataFrame([], "red string, fk_ubigeo int")
 
-    redes_presentes = sorted({r for r in cand_to_red.values() if r})
-
-    rows, red_to_sk = [], {}
-    for sk, red in enumerate(redes_presentes, start=1):
-        depto = red_to_depto.get(red)
-        fk_ubigeo = DEPARTAMENTO_SK.get(depto, SK_SENTINEL)
-        if "PRESTACIONAL" in red:
-            tipo_red = "RP"
-        elif "ASISTENCIAL" in red:
-            tipo_red = "RA"
-        else:
-            tipo_red = "INST"
-        red_to_sk[red] = sk
-        rows.append(
-            {
-                "SK_Entidad": sk,
-                "FK_Ubigeo": fk_ubigeo,
-                "Cod_EESS": f"RED{sk:03d}",
-                "RUC_Entidad": RUC_ESSALUD,
-                "Red_Asistencial": red[:100],
-                "Tipo_Red": tipo_red,
-                "Nombre_Centro": red[:200],
-                "Estado_Operativo": "FUNCIONA",
-            }
-        )
-
-    logger.info(f"Dim_Entidad: {len(rows)} redes asistenciales.")
-    return pd.DataFrame(rows), red_to_sk, cand_to_red
+    redes_sk = (
+        cand_red.where(F.col("red").isNotNull())
+        .select("red").distinct()
+        .withColumn("SK_Entidad", F.row_number().over(Window.orderBy("red")))
+    )
+    ent = redes_sk.join(fk_df, "red", "left").withColumn(
+        "FK_Ubigeo", F.coalesce(F.col("fk_ubigeo"), F.lit(SK_SENTINEL))
+    )
+    tipo_red = (
+        F.when(F.col("red").contains("PRESTACIONAL"), F.lit("RP"))
+        .when(F.col("red").contains("ASISTENCIAL"), F.lit("RA"))
+        .otherwise(F.lit("INST"))
+    )
+    dim_ent = ent.select(
+        "SK_Entidad",
+        "FK_Ubigeo",
+        F.format_string("RED%03d", F.col("SK_Entidad")).alias("Cod_EESS"),
+        F.lit(RUC_ESSALUD).alias("RUC_Entidad"),
+        F.substring(F.col("red"), 1, 100).alias("Red_Asistencial"),
+        tipo_red.alias("Tipo_Red"),
+        F.substring(F.col("red"), 1, 200).alias("Nombre_Centro"),
+        F.lit("FUNCIONA").alias("Estado_Operativo"),
+    )
+    logger.info(f"Dim_Entidad: {dim_ent.count()} redes asistenciales.")
+    return dim_ent, cand_red
 
 
 # ── Resolución de la Fact ────────────────────────────────────────────────────
-def _tipo_proceso_sk(metodo_contratacion: str, detalles: Optional[str]) -> int:
-    """SK_Tipo_Proceso desde el método/detalle OCDS (default DESCONOCIDO)."""
-    if metodo_contratacion == "direct":
-        return SK_TIPO_PROCESO_CD
-    det = normalize_text(detalles) or ""
-    for clave, sk in TIPO_PROCESO_SK.items():
-        if clave in det:
-            return sk
-    return SK_TIPO_PROCESO_DESCONOCIDO
-
-
 def resolve_fact(
-    flat_df: pd.DataFrame,
-    desc_to_sk: Dict[str, int],
-    ruc_to_sk: Dict[str, int],
-    red_to_sk: Dict[str, int],
-    cand_to_red: Dict[str, Optional[str]],
-    entidad_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Resuelve todas las FK y arma el DataFrame de la Fact. Descarta filas sin año
-    fiscal identificable (Anio_Fiscal es NOT NULL en el DW).
-    """
-    red_to_ubigeo = dict(zip(entidad_df["Red_Asistencial"], entidad_df["FK_Ubigeo"]))
+    flat_df: DataFrame,
+    prov_map: DataFrame,
+    desc_sk_df: DataFrame,
+    dim_ent: DataFrame,
+    cand_red: DataFrame,
+) -> DataFrame:
+    """Resuelve todas las FK por join y arma la Fact. Descarta filas sin año fiscal."""
+    f = flat_df.where(F.col("anio_fiscal").isNotNull())
+    f = f.withColumn("norm", _norm_udf(F.col("descripcion_item")))
 
-    rows = []
-    descartadas = 0
-    for _, r in flat_df.iterrows():
-        anio = r.get("anio_fiscal")
-        if pd.isna(anio):
-            descartadas += 1
-            continue
+    # Medicamento (norm -> FK), Proveedor (ruc -> SK).
+    f = f.join(desc_sk_df, "norm", "left").withColumn(
+        "FK_Medicamento", F.coalesce(F.col("fk_medicamento"), F.lit(SK_MED_NO_FARMA))
+    )
+    f = f.join(prov_map, "ruc_proveedor", "left").withColumn(
+        "FK_Proveedor", F.coalesce(F.col("SK_Proveedor"), F.lit(SK_SENTINEL))
+    )
 
-        # Red -> FK_Entidad y FK_Ubigeo_Item (Gap 3: el ítem hereda el dpto. de la Red).
-        red_canonica = cand_to_red.get(r.get("red_candidato"))
-        fk_entidad = red_to_sk.get(red_canonica, SK_SENTINEL) if red_canonica else SK_SENTINEL
-        fk_ubigeo_item = red_to_ubigeo.get(red_canonica, SK_SENTINEL) if red_canonica else SK_SENTINEL
+    # Entidad: red_candidato -> red canónica -> SK_Entidad + FK_Ubigeo_Item.
+    ent_map = dim_ent.select(
+        F.col("Red_Asistencial").alias("_red_canon"),
+        F.col("SK_Entidad"),
+        F.col("FK_Ubigeo").alias("_ent_fkubigeo"),
+    )
+    f = (
+        f.join(cand_red.withColumnRenamed("red", "_red_canon"), "red_candidato", "left")
+        .join(ent_map, "_red_canon", "left")
+        .withColumn("FK_Entidad", F.coalesce(F.col("SK_Entidad"), F.lit(SK_SENTINEL)))
+        .withColumn("FK_Ubigeo_Item", F.coalesce(F.col("_ent_fkubigeo"), F.lit(SK_SENTINEL)))
+    )
 
-        # Medicamento.
-        norm = normalize_text(r.get("descripcion_item"))
-        fk_med = desc_to_sk.get(norm, SK_MED_NO_FARMA) if norm else SK_MED_NO_FARMA
+    # Tipo de proceso.
+    f = f.withColumn("_det_norm", _norm_udf(F.col("detalles_metodo")))
+    tp = F.when(F.col("metodo_contratacion") == "direct", F.lit(SK_TIPO_PROCESO_CD))
+    for clave, sk in TIPO_PROCESO_SK.items():
+        tp = tp.when(F.col("_det_norm").contains(clave), F.lit(sk))
+    tp = tp.otherwise(F.lit(SK_TIPO_PROCESO_DESCONOCIDO))
+    f = f.withColumn("FK_Tipo_Proceso", tp)
 
-        # Proveedor.
-        fk_prov = ruc_to_sk.get(r.get("ruc_proveedor"), SK_SENTINEL)
-
-        es_cd = bool(r.get("es_contratacion_directa"))
-        fuera_petitorio = "FUERA DEL PETITORIO" in (norm or "")
-
-        rows.append(
-            {
-                "FK_Tiempo_Convocatoria": _to_sk_tiempo(r.get("fecha_convocatoria")),
-                "FK_Tiempo_Buena_Pro": _to_sk_tiempo(r.get("fecha_buena_pro")),
-                "FK_Tiempo_Suscripcion": _to_sk_tiempo(r.get("fecha_suscripcion")),
-                "FK_Tiempo_Emision_OC": SK_TIEMPO_NULO,  # Gap 1: OCDS no expone OC
-                "FK_Entidad": fk_entidad,
-                "FK_Medicamento": fk_med,
-                "FK_Proveedor": fk_prov,
-                "FK_Tipo_Proceso": _tipo_proceso_sk(r.get("metodo_contratacion"), r.get("detalles_metodo")),
-                "FK_Ubigeo_Item": fk_ubigeo_item,
-                "Fecha_Convocatoria": _to_date(r.get("fecha_convocatoria")),
-                "Fecha_Buena_Pro": _to_date(r.get("fecha_buena_pro")),
-                "Fecha_Suscripcion": _to_date(r.get("fecha_suscripcion")),
-                "Fecha_Emision_OC": None,  # Gap 1
-                "N_Item": None,            # id OCDS excede SMALLINT; sin nº de ítem secuencial
-                "Cantidad_Adjudicada": _num(r.get("cantidad")),
-                "Monto_Referencial_Soles": _num(r.get("monto_referencial")),
-                "Monto_Adjudicado_Soles": _num(r.get("monto_adjudicado")),
-                "Monto_Contratado_Item": _num(r.get("monto_contratado")),
-                "Monto_Adicional": _num(r.get("monto_adicional")),
-                "Monto_Total_OC": 0,       # Gap 1
-                "Flag_Contratacion_Directa": int(es_cd),
-                "Flag_Fuera_Petitorio": int(fuera_petitorio),
-                "Estado_Item": _trunc(r.get("estado_adjudicacion"), 30),
-                "Moneda_Original": "PEN",
-                "Fuente_Dataset": "CONTRATACION_DIRECTA" if es_cd else "ADJUDICACION",
-                "Anio_Fiscal": int(anio),
-            }
-        )
-
-    if descartadas:
-        logger.warning(f"Fact: {descartadas} filas descartadas sin año fiscal.")
-    logger.info(f"Fact: {len(rows)} filas resueltas.")
-    return pd.DataFrame(rows)
-
-
-def _num(value) -> float:
-    """NaN/None -> 0.0; numérico -> float."""
-    if value is None or pd.isna(value):
-        return 0.0
-    return float(value)
-
-
-def _trunc(value, length: int) -> Optional[str]:
-    """Recorta a `length` chars; None/NaN -> None."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return None
-    return str(value)[:length]
+    return f.select(
+        _sk_tiempo("fecha_convocatoria").alias("FK_Tiempo_Convocatoria"),
+        _sk_tiempo("fecha_buena_pro").alias("FK_Tiempo_Buena_Pro"),
+        _sk_tiempo("fecha_suscripcion").alias("FK_Tiempo_Suscripcion"),
+        F.lit(SK_TIEMPO_NULO).alias("FK_Tiempo_Emision_OC"),
+        "FK_Entidad", "FK_Medicamento", "FK_Proveedor", "FK_Tipo_Proceso", "FK_Ubigeo_Item",
+        F.col("fecha_convocatoria").alias("Fecha_Convocatoria"),
+        F.col("fecha_buena_pro").alias("Fecha_Buena_Pro"),
+        F.col("fecha_suscripcion").alias("Fecha_Suscripcion"),
+        F.lit(None).cast("date").alias("Fecha_Emision_OC"),
+        F.lit(None).cast("int").alias("N_Item"),
+        F.coalesce(F.col("cantidad"), F.lit(0.0)).alias("Cantidad_Adjudicada"),
+        F.coalesce(F.col("monto_referencial"), F.lit(0.0)).alias("Monto_Referencial_Soles"),
+        F.coalesce(F.col("monto_adjudicado"), F.lit(0.0)).alias("Monto_Adjudicado_Soles"),
+        F.coalesce(F.col("monto_contratado"), F.lit(0.0)).alias("Monto_Contratado_Item"),
+        F.coalesce(F.col("monto_adicional"), F.lit(0.0)).alias("Monto_Adicional"),
+        F.lit(0.0).alias("Monto_Total_OC"),
+        F.col("es_contratacion_directa").cast("int").alias("Flag_Contratacion_Directa"),
+        F.coalesce(F.col("norm").contains("FUERA DEL PETITORIO"), F.lit(False))
+        .cast("int").alias("Flag_Fuera_Petitorio"),
+        F.substring(F.col("estado_adjudicacion"), 1, 30).alias("Estado_Item"),
+        F.lit("PEN").alias("Moneda_Original"),
+        F.when(F.col("es_contratacion_directa"), F.lit("CONTRATACION_DIRECTA"))
+        .otherwise(F.lit("ADJUDICACION")).alias("Fuente_Dataset"),
+        F.col("anio_fiscal").cast("int").alias("Anio_Fiscal"),
+    )
 
 
 def resolve_all(
-    flat_df: pd.DataFrame, petitorio_df: pd.DataFrame, establecimientos_df: pd.DataFrame
-) -> Dict[str, pd.DataFrame]:
-    """Orquesta la construcción de dimensiones y la resolución de la Fact."""
-    dim_prov, ruc_to_sk = build_dim_proveedor(flat_df)
-    dim_med, desc_to_sk = build_dim_medicamento(flat_df, petitorio_df)
-    dim_ent, red_to_sk, cand_to_red = build_dim_entidad(flat_df, establecimientos_df)
-    fact = resolve_fact(flat_df, desc_to_sk, ruc_to_sk, red_to_sk, cand_to_red, dim_ent)
+    flat_df: DataFrame, petitorio_df: pd.DataFrame, establecimientos_df: pd.DataFrame
+) -> Dict[str, DataFrame]:
+    """Orquesta la construcción de dimensiones y la resolución de la Fact (Spark)."""
+    flat_df = flat_df.cache()
+    flat_df.count()  # materializa el cache (evita recomputar el flatten por dimensión)
+
+    dim_prov, prov_map = build_dim_proveedor(flat_df)
+    dim_med, desc_sk_df = build_dim_medicamento(flat_df, petitorio_df)
+    dim_ent, cand_red = build_dim_entidad(flat_df, establecimientos_df)
+    fact = resolve_fact(flat_df, prov_map, desc_sk_df, dim_ent, cand_red)
     return {
         "dim_entidad": dim_ent,
         "dim_medicamento": dim_med,

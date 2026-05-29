@@ -20,6 +20,12 @@ jobs:
         python-version: "3.11"
         cache: "pip"
 
+    - name: Set up Java 17 (requerido por PySpark)
+      uses: actions/setup-java@v4
+      with:
+        distribution: "temurin"
+        java-version: "17"
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip

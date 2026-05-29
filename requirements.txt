@@ -10,4 +10,10 @@ pyodbc>=5.0.0
 sqlalchemy>=2.0.0
 xlrd>=2.0.1
 openpyxl>=3.1.0
-pyarrow>=15.0.0
+# pyarrow habilita los Pandas UDFs sobre Arrow. El límite superior evita que el
+# formato IPC de pyarrow supere al Arrow Java embebido en Spark 4.1 (18.3.x),
+# lo que crashea los workers. Mantener pyarrow alineado con esa serie.
+pyarrow>=15.0.0,<19.0.0
+
+# Spark engine (Silver/Gold distributed processing). Requires Java 17+ (JRE).
+pyspark>=3.5.0

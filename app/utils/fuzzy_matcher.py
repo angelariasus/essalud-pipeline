@@ -1,7 +1,10 @@
 import re
 from typing import List, Optional
 
+import pandas as pd
 from rapidfuzz import fuzz, process
+from pyspark.sql.functions import pandas_udf
+from pyspark.sql.types import StructField, StructType, StringType, DoubleType
 
 from app.loaders.master_loader import normalize_text
 from app.audit.logger import setup_logger
@@ -171,3 +174,87 @@ def match_red_asistencial(candidato: Optional[str], red_choices: List[str]) -> d
     if score >= SCORE_RED_MIN:
         return {"red": red, "score": score}
     return {"red": None, "score": score}
+
+
+# ── Pandas UDFs vectorizados (Apache Arrow) ──────────────────────────────────
+# rapidfuzz es C++ monohilo; en Spark se vectoriza por particiones vía Arrow.
+# Cada UDF recorre la Serie reusando la lógica escalar (resultados idénticos) y
+# encapsula cada elemento en try/except: ante un fallo retorna un "sentinel"
+# (metodo='ERROR: ...') en vez de abortar el Job de Spark (graceful degradation).
+#
+# Los maestros (DENOMINACION_DCI_NORM, RED_NORM) se envían como variables
+# Broadcast a los nodos; las factories capturan ese Broadcast en el closure.
+
+MED_MATCH_SCHEMA = StructType([
+    StructField("dci", StringType()),
+    StructField("score", DoubleType()),
+    StructField("metodo", StringType()),
+])
+
+RED_MATCH_SCHEMA = StructType([
+    StructField("red", StringType()),
+    StructField("score", DoubleType()),
+])
+
+
+def make_match_medicamento_udf(broadcast_choices):
+    """
+    Devuelve un pandas_udf que clasifica descripciones SEACE contra el Petitorio.
+
+    Args:
+        broadcast_choices: Broadcast de la lista DENOMINACION_DCI_NORM (normalizada).
+
+    Returns:
+        pandas_udf (Serie[str] -> DataFrame[dci, score, metodo]).
+    """
+
+    @pandas_udf(MED_MATCH_SCHEMA)
+    def _udf(descripciones: pd.Series) -> pd.DataFrame:
+        choices = broadcast_choices.value
+        dcis: List[Optional[str]] = []
+        scores: List[float] = []
+        metodos: List[str] = []
+        for desc in descripciones:
+            try:
+                res = match_medicamento(desc, choices)
+                dcis.append(res["dci"])
+                scores.append(float(res["score"]))
+                metodos.append(res["metodo"])
+            except Exception as exc:  # noqa: BLE001 - fail-safe por elemento
+                dcis.append(None)
+                scores.append(0.0)
+                metodos.append(f"ERROR: {exc}")
+        return pd.DataFrame(
+            {"dci": dcis, "score": pd.Series(scores, dtype="float64"), "metodo": metodos}
+        )
+
+    return _udf
+
+
+def make_match_red_udf(broadcast_choices):
+    """
+    Devuelve un pandas_udf que resuelve candidatos de Red contra el maestro.
+
+    Args:
+        broadcast_choices: Broadcast de la lista RED_NORM canónica.
+
+    Returns:
+        pandas_udf (Serie[str] -> DataFrame[red, score]).
+    """
+
+    @pandas_udf(RED_MATCH_SCHEMA)
+    def _udf(candidatos: pd.Series) -> pd.DataFrame:
+        choices = broadcast_choices.value
+        reds: List[Optional[str]] = []
+        scores: List[float] = []
+        for cand in candidatos:
+            try:
+                res = match_red_asistencial(cand, choices)
+                reds.append(res["red"])
+                scores.append(float(res["score"]))
+            except Exception as exc:  # noqa: BLE001 - fail-safe por elemento
+                reds.append(None)
+                scores.append(0.0)
+        return pd.DataFrame({"red": reds, "score": pd.Series(scores, dtype="float64")})
+
+    return _udf

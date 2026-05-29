@@ -13,6 +13,7 @@ Registro completo de todos los cambios realizados en el proyecto, desde la confi
 5. [Bugs corregidos (Fase 5)](#5-bugs-corregidos-fase-5)
 6. [Cómo ejecutar el pipeline completo](#6-cómo-ejecutar-el-pipeline-completo)
 7. [Actualización 2026-05-28 — Granularidad nivel Red, idempotencia del DDL y recarga](#7-actualización-2026-05-28--granularidad-nivel-red-idempotencia-del-ddl-y-recarga)
+8. [Actualización 2026-05-28 — Migración a PySpark: Silver/Gold distribuido](#8-actualización-2026-05-28--migración-a-pyspark-silvergold-distribuido)
 
 ---
 
@@ -27,8 +28,9 @@ essalud-pipeline/
 ├── AGENTS.md                     ← Hechos de alta señal para agentes de IA
 ├── CHANGELOG.md                  ← ← ESTE ARCHIVO
 ├── CLAUDE.md                     ← Guía para Claude Code
-├── Dockerfile                    ← Extiende apache/airflow:2.9.1
-├── PLAN_IMPLEMENTACION.md        ← Plan original de implementación (10 Pasos)
+├── Dockerfile                    ← Extiende apache/airflow:2.9.1, incluye Java 17 (JRE)
+├── GEMINI.md                     ← Descripción del proyecto para Gemini
+├── PLAN_MIGRACION_PYSPARK.md     ← Plan de migración a PySpark
 ├── README.md                     ← README del proyecto
 ├── docker-compose.yaml           ← Stack completo Airflow (Postgres, Redis, Webserver, Scheduler, Worker, Triggerer, Flower)
 ├── main.py                       ← CLI entrypoint (targeted / bulk)
@@ -45,7 +47,8 @@ essalud-pipeline/
 │   │   └── ocds_client.py        ← HTTP client con retry/backoff
 │   ├── config/
 │   │   ├── __init__.py
-│   │   └── settings.py           ← Config centralizada vía env vars
+│   │   ├── settings.py           ← Config centralizada vía env vars
+│   │   └── spark_session.py      ← Singleton SparkSession (PySpark)
 │   ├── loaders/
 │   │   ├── __init__.py
 │   │   ├── dw_loader.py          ← DDL + dim/fact load a SQL Server
@@ -76,7 +79,8 @@ essalud-pipeline/
 │   └── silver_dag.py             ← 1 DAG: silver_pipeline (monthly, trigger desde targeted)
 │
 ├── star-schema/
-│   └── EsSalud_StarSchema_DDL.sql  ← DDL completo: 7 tablas + 3 vistas + validación post-carga
+│   ├── EsSalud_StarSchema_DDL.sql  ← DDL completo: 7 tablas + 3 vistas + validación post-carga
+│   └── EsSalud_Staging_DDL.sql     ← DDL staging + oro.usp_Load_From_Staging (carga atómica)
 │
 ├── data/
 │   ├── bronze/
@@ -85,8 +89,9 @@ essalud-pipeline/
 │   │       └── 20131257750/
 │   │           └── 2024/           ← 100 records (--year 2024 --limit 100)
 │   ├── silver/
-│   │   └── staging/
-│   │       └── ocds_flat_2024.parquet  ← 155 filas-ítem
+│   │   ├── staging/
+│   │   │   └── ocds_flat_2024.parquet  ← 155 filas-ítem (formato anterior)
+│   │   └── staging_flat/               ← Parquet particionado por anio_fiscal (PySpark)
 │   └── audit/
 │       └── executions/
 │           └── ocds_extraction.log
@@ -96,10 +101,13 @@ essalud-pipeline/
 │   └── 5992483-*.xlsx                                    ← 403 centros / 35 redes
 │
 ├── test/
-│   ├── conftest.py                  ← ← CREADO (ahora redundante, ver bugs)
-│   ├── test_api.py                  ← ← REESCRITO: 6 tests con aserciones reales
-│   ├── test_bronze_layer.py         ← ← REESCRITO: mocks, atributos correctos
-│   └── test_dag_integrity.py        ← ← MODIFICADO: pytest.importorskip
+│   ├── conftest.py                  ← Fixtures Spark + marcador requires_spark
+│   ├── test_api.py                  ← 6 tests con aserciones reales
+│   ├── test_bronze_layer.py         ← Mocks, atributos correctos
+│   ├── test_dag_integrity.py        ← pytest.importorskip
+│   ├── test_dw_loader.py            ← 8 tests dw_loader con mocks
+│   ├── test_fuzzy_matcher.py        ← 6 tests fuzzy matching escalar
+│   └── test_silver_spark.py         ← 5 tests integración Silver/Gold con Spark
 │
 ├── config/                          ← (mount target Airflow)
 ├── logs/                            ← logs Airflow (scheduler, dag_processor_manager)
@@ -754,3 +762,229 @@ FK integrity: **0 orphans** en las 9 FKs. KPIs: Referencial S/ 186.5M · Adjudic
 
 - **Alcance temporal**: el OCDS API no filtra por año en el servidor. Al escanear 1500 registros del portal, **2022 y 2023 no aparecen** y los EsSalud-goods son ~0.87% del total. Extraer "10/año para 2022-2025" es inviable; la muestra práctica es de 2024. Por procesos plurianuales, su `Anio_Fiscal` (derivado de la fecha de convocatoria) reparte en 2022 (1), 2023 (101) y 2024 (53).
 - **Proporción de medicamentos**: solo **~12%** de los goods de EsSalud son medicamentos del Petitorio (18 de 155 filas). El ~88% restante son reactivos, dispositivos, insumos y servicios de suministro. El análisis farmacéutico (HHI) opera sobre esa fracción.
+
+---
+
+## 8. Actualización (2026-05-28) — Migración a PySpark: Silver/Gold distribuido
+
+Esta sesión migró el procesamiento de la capa Silver (aplanamiento, fuzzy matching, resolución de dimensiones) de **pandas a PySpark**, incorporando un pipeline de carga atómica vía staging tables JDBC. También se eliminó `PLAN_IMPLEMENTACION.md` (reemplazado por `PLAN_MIGRACION_PYSPARK.md`).
+
+### 8.1 Nuevo módulo: `app/config/spark_session.py`
+
+Singleton `get_spark_session()` que centraliza la configuración de Spark:
+
+- **Arrow** habilitado con fallback (`spark.sql.execution.arrow.pyspark.fallback.enabled=true`) para Pandas UDFs vectorizados.
+- **Adaptive Query Execution** para coalesce automático de particiones.
+- `spark.sql.shuffle.partitions` acotado a datasets locales pequeños.
+- JARs del driver JDBC de SQL Server vía `spark.jars.packages` o `spark.jars` (configurable por env vars).
+- `PYSPARK_PYTHON` fijado al mismo intérprete del driver (evita error "Python not found" en Windows con Microsoft Store alias).
+- `spark.sql.ansi.enabled=false` (los datos OCDS sucios coercen a NULL como `pd.errors='coerce'`).
+- Timezone `America/Lima`, faulthandler en workers UDF.
+- `stop_spark_session()` para limpieza ordenada.
+
+### 8.2 Nuevo módulo: `app/utils/fuzzy_matcher.py`
+
+Motor de fuzzy matching basado en `rapidfuzz` con dos variantes:
+
+**Funciones escalares** (usables también sin Spark):
+
+| Función | Propósito |
+|---|---|
+| `match_medicamento(desc, petitorio_choices)` | Clasifica descripción SEACE contra Denominaciones DCI del Petitorio. Retorna `{dci, score, metodo}` con 4 niveles: EXACTO (≥90), FUZZY (≥70), DUDOSO (<70), HISTORICO ("FUERA DEL PETITORIO") |
+| `extract_red_asistencial(title, descriptions)` | Extrae candidato de Red en cascada: (1) código SEACE en título → `CODIGO_RED_MAP`, (2) nombre explícito "RED ASISTENCIAL/PRESTACIONAL..." en texto, (3) SIN_RED |
+| `match_red_asistencial(candidato, red_choices)` | Resuelve candidato contra valores canónicos del maestro de Establecimientos (umbral ≥80) |
+
+**Pandas UDFs vectorizados** (Arrow):
+
+| UDF | Schema retorno |
+|---|---|
+| `make_match_medicamento_udf(broadcast_choices)` | `(dci: String, score: Double, metodo: String)` |
+| `make_match_red_udf(broadcast_choices)` | `(red: String, score: Double)` |
+
+Ambos UDFs envuelven cada elemento en `try/except`: si una fila falla, retorna un sentinel (`ERROR: ...`) en lugar de abortar el Job de Spark (*graceful degradation*). Los maestros se transmiten vía `spark.sparkContext.broadcast()`.
+
+**`CODIGO_RED_MAP`**: 34 entradas que mapean códigos SEACE de 3–6 caracteres (p. ej. `RAMOQ`→`RED ASISTENCIAL MOQUEGUA`, `RPREB`→`RED PRESTACIONAL REBAGLIATI`) a los nombres canónicos del Excel de Establecimientos. Resuelve el Gap 2: los códigos en los títulos OCDS no matchean por similitud de caracteres.
+
+### 8.3 Nuevo DDL: `star-schema/EsSalud_Staging_DDL.sql`
+
+Esquema de staging para carga atómica a producción:
+
+- Crea el esquema `[stg]` (si no existe).
+- Define `oro.usp_Load_From_Staging`: stored procedure que en **una transacción**:
+  1. `SET IDENTITY_INSERT ON` → INSERT desde `stg.Dim_*` a `oro.Dim_*` con SKs deterministas ya resueltas por Spark.
+  2. INSERT desde `stg.Fact_Ordenes_Y_Contratos` a `oro.Fact_Ordenes_Y_Contratos` (SK_Hecho es IDENTITY automática).
+  3. `COMMIT` si todo ok; `ROLLBACK` + `THROW` si falla.
+- Spark escribe los DataFrames a `stg.*` por JDBC (`.mode("overwrite")`), luego el pipeline invoca el procedure.
+
+**Flujo**: `DDL producción` → `DDL staging` → `write_staging_jdbc()` (Spark escribe stg.*) → `call_load_procedure()` (ejecuta `usp_Load_From_Staging`). Si Spark falla, producción no se toca. Si el procedure falla, ROLLBACK.
+
+### 8.4 `test/conftest.py` — Fixtures compartidos para Spark
+
+- `requires_spark = pytest.mark.skipif(not SPARK_AVAILABLE, ...)` — omitir tests si falta pyspark/Java.
+- `spark` fixture (session scope): llama `get_spark_session("pytest_essalud")`, al final `stop_spark_session()`.
+
+### 8.5 Archivos creados
+
+| Archivo | Propósito |
+|---|---|
+| `app/config/spark_session.py` | Singleton SparkSession (100 líneas) |
+| `app/utils/fuzzy_matcher.py` | Fuzzy matching escalar + Pandas UDFs (260 líneas) |
+| `star-schema/EsSalud_Staging_DDL.sql` | Esquema stg + usp_Load_From_Staging (92 líneas) |
+| `PLAN_MIGRACION_PYSPARK.md` | Plan de migración (156 líneas, reemplaza implementación previa) |
+| `GEMINI.md` | Descripción del proyecto para Gemini (análogo a CLAUDE.md) |
+| `test/conftest.py` | Fixtures compartidos Spark (35 líneas) |
+| `test/test_silver_spark.py` | 5 tests de integración Silver/Gold con Spark (175 líneas) |
+| `test/test_dw_loader.py` | 8 tests unitarios del dw_loader con mocks (79 líneas) |
+| `test/test_fuzzy_matcher.py` | 6 tests de lógica escalar fuzzy matching (60 líneas) |
+| `data/silver/staging_flat/` | Parquet staging con Hive partitioning por `anio_fiscal` |
+
+### 8.6 Archivos modificados
+
+#### `app/services/ocds_flattener.py` — De pandas a PySpark
+
+**Antes**: `flatten_record()` procesaba un dict JSON con pandas, iterando manualmente items→awards→contracts.
+
+**Después**: Tres funciones Spark:
+- `read_bronze(spark, paths)` — Lee directorios de JSONs con `PERMISSIVE` mode, capturando corruptos en `_corrupt_record`.
+- `split_corrupt(df)` — Separa filas válidas vs corruptas (auditoría sin abortar).
+- `flatten_paths(spark, paths)` — Transformación completa que **explota items** y resuelve award/contract por `awardID` en cascada (Spark SQL joins). Retorna columnas: `ocid`, `descripcion_item`, `cantidad`, `monto_referencial`, `monto_adjudicado`, `monto_contratado`, `ruc_proveedor`, `red_candidato`, `fecha_*`, `es_contratacion_directa`, `tiene_adenda`, `anio_fiscal`, etc.
+
+Se eliminó `flatten_record()` y `flatten_dataframe()` (pandas). La nueva función `flatten_paths()` se integra con el pipeline Silver.
+
+#### `app/services/dim_resolver.py` — De pandas a PySpark con broadcast
+
+**Antes**: `build_dim_*()` retornaba DataFrames pandas; la resolución FK usaba bucles con `fuzzy_matcher.match_medicamento()` llamada fila por fila.
+
+**Después**: `resolve_all(flat_df, petitorio_pdf, establecimientos_pdf)` retorna un dict con 6 DataFrames Spark:
+
+| Dimensión | SKs | Broadcast |
+|---|---|---|
+| `dim_proveedor` | Determinista (hash de RUC), sentinel -1 | — |
+| `dim_medicamento` | Auto-incremental desde 1, sentinels -1, -2 | `petitorio_dci_norm` via broadcast |
+| `dim_entidad` | Determinista (hash de Cod_EESS), sentinel -1 | `CODIGO_RED_MAP` + `redes_norm` via broadcast |
+| `dim_tiempo` | Derivado de fecha → `SK_Tiempo` | — |
+| `dim_tipo_proceso` | Mapeo directo (precargados SK 1–11) | — |
+| `fact` | Contiene todas las FKs resueltas | — |
+
+**Fuzzy matching vectorizado**: `make_match_medicamento_udf(broadcast_choices)` se aplica como `withColumn` sobre toda la columna de descripciones en una sola pasada (Pandas UDF sobre Arrow). La resolución de Red usa `extract_red_asistencial()` → `make_match_red_udf()` para extraer y matchear en serie.
+
+SKs de departamento (`DEPARTAMENTO_SK`) mapeados en duro (25 departamentos + Amazonas, SK 1–26), consistente con Dim_Ubigeo del DDL.
+
+#### `app/loaders/dw_loader.py` — Nuevo flujo staging + JDBC
+
+**Antes**: `load_all(engine, dims, ddl_path)` ejecutaba DDL SQL, luego insertaba con `method='multi'` y `chunksize=100` directamente a `oro.*`.
+
+**Después**: Nuevas funciones:
+
+| Función | Propósito |
+|---|---|
+| `_split_sql_batches(sql)` | Separa batches por `GO` |
+| `execute_ddl(engine, ddl_path)` | Ejecuta batches DDL (producción + staging) |
+| `_jdbc_conn()` | Deriva URL JDBC desde `DW_JDBC_URL` o desde `DW_CONN_STRING` (parsea con `make_url`) |
+| `_jdbc_write_options()` | Dict con 15 opciones JDBC (driver, batchsize, trustServerCertificate, etc.) |
+| `write_staging_jdbc(dims_fact, table_name)` | Escribe un DataFrame Spark a `stg.<table>` vía `.write.jdbc()` con `mode="overwrite"` |
+| `write_all_staging(dims_fact)` | Itera sobre todas las tablas y escribe cada una a staging |
+| `call_load_procedure(engine)` | Ejecuta `EXEC oro.usp_Load_From_Staging` |
+| `load_all(dims_fact, ddl_path, engine)` | Orquesta: DDL prod → DDL staging → write_all_staging → call_load_procedure |
+
+**`_jdbc_conn()`** soporta dos modos:
+1. `OCDS_DW_JDBC_URL` — URL JDBC directa (ej. para Spark).
+2. Fallback a `OCDS_DW_CONN_STRING` — deriva automáticamente `jdbc:sqlserver://<host>:<port>;databaseName=<db>;encrypt=true;trustServerCertificate=true` desde la cadena SQLAlchemy.
+
+#### `app/pipelines/silver_layer.py` — Actualizado para Spark
+
+- **Antes**: `SilverPipeline.run()` usaba `ocds_flattener.flatten_dataframe()`, `dim_resolver.build_dim_*()` (pandas) y `dw_loader.load_all(engine, dims, ddl_path)`.
+- **Después**: 
+  - Crea `SparkSession` al inicio, la detiene al final (vía `try/finally`).
+  - `flatten_paths(spark, ...)` reemplaza al flattening pandas.
+  - `resolve_all(flat_df, petitorio_pdf, establecimientos_pdf)` reemplaza a las funciones pandas.
+  - `dw_loader.load_all(dims_fact, ddl_path, engine)` recibe el dict de DataFrames Spark + engine SQLAlchemy.
+  - Soporta `years=[...]` para filtrar por año fiscal.
+
+#### `app/config/settings.py` — Nuevas variables Spark
+
+Agregadas: `SPARK_APP_NAME`, `SPARK_MASTER`, `SPARK_SHUFFLE_PARTITIONS`, `SPARK_JARS_PACKAGES`, `SPARK_JARS`, `DW_JDBC_URL`, `DW_JDBC_USER`, `DW_JDBC_PASSWORD`, `DW_JDBC_BATCHSIZE`.
+
+#### `requirements.txt` — Nuevas dependencias
+
+```diff
++ pyspark>=3.5.0
+- pyarrow>=15.0.0
++ pyarrow>=15.0.0,<19.0.0   # límite superior para compatibilidad con Arrow Java de Spark 4.1
+```
+
+#### `Dockerfile` — Java 17 para PySpark
+
+```dockerfile
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends default-jre-headless procps \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+USER airflow
+```
+
+La imagen base `apache/airflow:2.9.1` (Debian) no trae JRE. `default-jre-headless` instala OpenJDK 17, compatible con PySpark 3.5/4.x.
+
+#### `.github/workflows/ci.yml` — Java 17 en CI
+
+Agregado paso `actions/setup-java@v4` con `distribution: temurin` y `java-version: "17"` antes de instalar dependencias Python.
+
+#### `CLAUDE.md` — Actualizado
+
+Refleja el nuevo stack: PySpark, Rapidfuzz, staging atómico. Sección "Capa Silver" actualizada a "Silver/Gold (Spark + Staging atómico)".
+
+### 8.7 Archivos eliminados
+
+| Archivo | Motivo |
+|---|---|
+| `PLAN_IMPLEMENTACION.md` | Reemplazado por `PLAN_MIGRACION_PYSPARK.md` |
+| `data/silver/staging/ocds_flat_2015.parquet` | Reemplazado por staging_flat particionado |
+| `data/silver/staging/ocds_flat_2024.parquet` | Reemplazado por staging_flat particionado |
+
+### 8.8 Tests nuevos — cobertura Silver/Gold
+
+| Archivo | Tests | Descripción |
+|---|---|---|
+| `test/test_silver_spark.py` | `test_flatten_grano_y_corrupcion` | Lee 3 JSONs sintéticos + 1 corrupto; `split_corrupt` captura el corrupto sin abortar |
+| | `test_flatten_cascada_award_contract` | Verifica resolución award→contract por awardID, montos, `es_contratacion_directa`, `tiene_adenda`, `red_candidato` (código RAMOQ) |
+| | `test_resolve_all_fk_integridad` | Pipeline completo flatten→resolve→Fact: 2 proveedores, 1 medicamento, 1 entidad, FK sets correctos |
+| | `test_fuzzy_udf_graceful_degradation` | Broadcast inválido (int en vez de lista) → UDF retorna `ERROR:*` en vez de abortar el Job |
+| `test/test_dw_loader.py` | `test_split_sql_batches_por_go` | Separa batches SQL por `GO` |
+| | `test_staging_ddl_existe_y_define_procedure` | Verifica que `EsSalud_Staging_DDL.sql` existe, contiene CREATE SCHEMA y usp_Load_From_Staging |
+| | `test_jdbc_write_options` | Construye opciones JDBC correctas desde settings |
+| | `test_jdbc_se_deriva_de_conn_string` | Deriva URL JDBC desde SQLAlchemy `DW_CONN_STRING` |
+| | `test_write_staging_jdbc_requiere_conexion` | Sin URL ni conn string → ValueError |
+| | `test_call_load_procedure_ejecuta_exec` | Verifica que `call_load_procedure()` ejecuta `EXEC oro.usp_Load_From_Staging` |
+| | `test_load_all_orquesta_en_orden` | Orden correcto: DDL prod → DDL staging → staging → procedure |
+| `test/test_fuzzy_matcher.py` | 6 tests | match_medicamento (exacto, histórico, dudoso/vacío), extract_red (código, nombre_texto, sin_red), match_red_asistencial |
+
+### 8.9 Cambios en el diseño de datos
+
+**Nuevo directorio staging** con particionamiento Hive:
+```
+data/silver/staging_flat/
+├── anio_fiscal=2022/
+│   └── part-00000-xxx.snappy.parquet
+├── anio_fiscal=2023/
+│   ├── part-00000-xxx.snappy.parquet
+│   ├── part-00001-xxx.snappy.parquet
+│   ├── part-00002-xxx.snappy.parquet
+│   └── part-00003-xxx.snappy.parquet
+├── anio_fiscal=2024/
+│   ├── part-00000-xxx.snappy.parquet
+│   ├── part-00001-xxx.snappy.parquet
+│   ├── part-00002-xxx.snappy.parquet
+│   └── part-00003-xxx.snappy.parquet
+└── _SUCCESS
+```
+
+Los Parquet planos individuales `ocds_flat_<year>.parquet` fueron reemplazados por el formato particionado que soporta lectura selectiva por año y escalabilidad horizontal con Spark.
+
+### 8.10 Principios de diseño aplicados
+
+1. **Fail-safe**: registros corruptos capturados en `_corrupt_record` sin detener el job; UDFs con `try/except` por elemento retornan sentinels.
+2. **Carga atómica**: staging tables + `usp_Load_From_Staging` en transacción única; si Spark falla, producción intacta; si el procedure falla, ROLLBACK.
+3. **SKs deterministas**: las dimensiones no dependen de `IDENTITY` de SQL Server; Spark calcula SKs por hash/regla, permitiendo `SET IDENTITY_INSERT` y recargas idempotentes.
+4. **Graceful degradation**: ante un error en el fuzzy matching de una fila, se asigna sentinel en lugar de abortar todo el Job.`

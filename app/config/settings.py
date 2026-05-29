@@ -34,7 +34,26 @@ class Settings:
     R2_BUCKET_NAME: str = os.getenv("OCDS_R2_BUCKET_NAME", "essalud-bronze-lake")
 
     # Data Warehouse (capa Gold - SQL Server). La cadena lleva credenciales: definir en .env.
+    # DW_CONN_STRING (SQLAlchemy/pyodbc) se usa para DDL y el stored procedure de carga atómica.
     DW_CONN_STRING: str = os.getenv("OCDS_DW_CONN_STRING", "")
+
+    # Conexión JDBC para la escritura distribuida con Spark a las tablas staging.
+    # Formato URL: jdbc:sqlserver://host:port;databaseName=...;encrypt=true;trustServerCertificate=true
+    DW_JDBC_URL: str = os.getenv("OCDS_DW_JDBC_URL", "")
+    DW_JDBC_USER: str = os.getenv("OCDS_DW_JDBC_USER", "")
+    DW_JDBC_PASSWORD: str = os.getenv("OCDS_DW_JDBC_PASSWORD", "")
+    DW_JDBC_BATCHSIZE: int = int(os.getenv("OCDS_DW_JDBC_BATCHSIZE", "10000"))
+
+    # Spark (capas Silver/Gold). El driver JDBC se inyecta por env para no
+    # depender de la red en pruebas/uso offline (ver app/config/spark_session.py).
+    # Default local[4]: en Windows, spawnear muchos workers de Python (UDFs)
+    # concurrentemente crashea (local[*] => 1 worker por core). 4 es seguro y
+    # paralelo; en Linux/Docker (sin ese bug) se puede subir a local[*] o clúster.
+    SPARK_MASTER: str = os.getenv("OCDS_SPARK_MASTER", "local[4]")
+    SPARK_APP_NAME: str = os.getenv("OCDS_SPARK_APP_NAME", "EsSalud_Pipeline")
+    SPARK_SHUFFLE_PARTITIONS: str = os.getenv("OCDS_SPARK_SHUFFLE_PARTITIONS", "8")
+    SPARK_JARS_PACKAGES: str = os.getenv("OCDS_SPARK_JARS_PACKAGES", "")
+    SPARK_JARS: str = os.getenv("OCDS_SPARK_JARS", "")
 
     LOG_LEVEL: str = os.getenv("OCDS_LOG_LEVEL", "INFO")
     MAX_RETRIES: int = int(os.getenv("OCDS_MAX_RETRIES", "5"))

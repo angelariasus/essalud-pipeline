@@ -67,6 +67,12 @@ coverage.xml
 # Data (keep data/ structure but ignore large files)
 data/audit/
 data/bronze/
+data/silver/
+
+# AI assistant instruction files (local-only, not versioned)
+CLAUDE.md
+AGENTS.md
+GEMINI.md
 
 # Temporary files
 *.tmp

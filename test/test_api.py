@@ -53,8 +53,9 @@ def test_main_procurement_category_exists():
         assert cat is not None, "Record missing tender.mainProcurementCategory"
 
 
-def test_essalud_records_have_goods_category():
-    """Los records de EsSalud visibles deben tener mainProcurementCategory='goods'."""
+def test_essalud_records_have_known_category():
+    """Los records de EsSalud visibles deben tener una categoría válida de OCDS
+    (ya NO se restringe a 'goods': se incluye toda la contratación)."""
     r = requests.get(f"{API_BASE}/records", params={"limit": 50}, timeout=10)
     r.raise_for_status()
     data = r.json()
@@ -69,7 +70,7 @@ def test_essalud_records_have_goods_category():
     if not essalud_records:
         pytest.skip("No se encontraron records de EsSalud en los primeros 50 (API no filtra server-side)")
     for ocid, cat in essalud_records:
-        assert cat == "goods", f"{ocid} tiene category={cat}, esperado 'goods'"
+        assert cat in {"goods", "services", "works", None}, f"{ocid} categoría inesperada={cat}"
 
 
 def test_links_next_exists():

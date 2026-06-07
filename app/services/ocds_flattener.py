@@ -54,6 +54,7 @@ _TENDER = StructType([
     StructField("procurementMethod", StringType()),
     StructField("procurementMethodDetails", StringType()),
     StructField("procurementMethodRationale", StringType()),
+    StructField("datePublished", StringType()),
     StructField("value", _VALUE),
     StructField("tenderPeriod", StructType([StructField("startDate", StringType())])),
     StructField("items", ArrayType(_ITEM)),
@@ -196,7 +197,13 @@ def flatten_dataframe(df_valid: DataFrame) -> DataFrame:
         .withColumn("detalles_metodo", tender["procurementMethodDetails"])
         .withColumn("causal_cd", tender["procurementMethodRationale"])
         .withColumn("monto_referencial", tender["value"]["amount"])
-        .withColumn("fecha_convocatoria_raw", tender["tenderPeriod"]["startDate"])
+        # Convocatoria = fecha de publicación del tender (datePublished, 100%
+        # poblado en el OCDS de SEACE); respaldo a tenderPeriod.startDate, que
+        # viene nulo ~11% de las veces.
+        .withColumn(
+            "fecha_convocatoria_raw",
+            F.coalesce(tender["datePublished"], tender["tenderPeriod"]["startDate"]),
+        )
         .withColumn("_items", items)
         .withColumn("_awards", F.col("compiledRelease.awards"))
         .withColumn("_contracts", F.col("compiledRelease.contracts"))
@@ -366,12 +373,22 @@ def flatten_all(
     ruc: str = settings.ESSALUD_RUC,
     spark: Optional[SparkSession] = None,
     save: bool = True,
+    scope_anio_fiscal: bool = True,
 ) -> DataFrame:
     """
     Aplana varios años de Bronze en un único DataFrame de Spark.
 
     Lee en una sola operación los directorios existentes de los años solicitados
     y, opcionalmente, persiste el resultado como Parquet particionado (staging).
+
+    Args:
+        scope_anio_fiscal: si True (default), conserva solo las filas cuyo
+            `anio_fiscal` (año de convocatoria, con respaldo buena pro /
+            suscripción) esté dentro de `years`. Las carpetas Bronze se
+            clasifican por `compiledRelease.date`, por lo que un expediente
+            actualizado en 2026 puede describir un proceso convocado años antes;
+            este filtro acota el DW al año real del proceso y descarta esos
+            procesos antiguos (y las filas sin ninguna fecha → anio_fiscal NULL).
     """
     spark = spark or get_spark_session()
     dirs = [_year_dir(y, ruc) for y in years]
@@ -381,7 +398,18 @@ def flatten_all(
         return _empty_flat(spark)
 
     flat = flatten_paths(spark, paths)
-    n = flat.count()
+
+    if scope_anio_fiscal:
+        total_pre = flat.count()
+        flat = flat.filter(F.col("anio_fiscal").isin(list(years)))
+        n = flat.count()
+        logger.info(
+            f"Alcance anio_fiscal {sorted(years)}: {n}/{total_pre} filas conservadas "
+            f"({total_pre - n} fuera de rango / sin fecha descartadas)."
+        )
+    else:
+        n = flat.count()
+
     logger.info(f"Aplanado: {n} filas-ítem de {len(paths)} año(s).")
 
     if save and n:

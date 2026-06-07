@@ -84,13 +84,16 @@ CREATE TABLE oro.Dim_Tiempo (
 );
 GO
 
--- Población 2022-2025 (CTE recursivo, más rápido que WHILE)
+-- Población 2010-2030 (CTE recursivo, más rápido que WHILE)
+-- Rango amplio: los procesos OCDS arrancan años antes del compiledRelease.date
+-- (fechas reales observadas desde 2015-11); margen inferior hasta 2010 y
+-- superior hasta 2030 para no romper la FK_Fact_T* con datos históricos/futuros.
 WITH Fechas AS (
-    SELECT CAST('2022-01-01' AS DATE) AS d
+    SELECT CAST('2010-01-01' AS DATE) AS d
     UNION ALL
     SELECT DATEADD(DAY, 1, d)
     FROM Fechas
-    WHERE d < '2025-12-31'
+    WHERE d < '2030-12-31'
 )
 INSERT INTO oro.Dim_Tiempo
 SELECT

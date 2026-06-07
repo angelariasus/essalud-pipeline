@@ -11,9 +11,10 @@ class TargetedExtractor:
     Extractor orientado a consultas específicas de la API OCDS.
     """
 
-    # Categorías de adquisición que nos interesan (medicamentos, dispositivos,
-    # reactivos, insumos se publican todos bajo "goods" en SEACE).
-    PHARMA_CATEGORIES = {"goods"}
+    # Categorías de adquisición a incluir. {"goods"} = solo bienes/medicamentos
+    # (medicamentos, dispositivos, reactivos, insumos se publican todos bajo
+    # "goods" en SEACE). Para incluir toda la contratación, usar None.
+    ACCEPTED_CATEGORIES = {"goods"}
 
     def __init__(self, client: OCDSClient):
         self.client = client
@@ -85,10 +86,11 @@ class TargetedExtractor:
                     if not rec_date.startswith(str(target_year)):
                         continue
 
-                # Filtrado por categoría de adquisición (bienes/farmacéuticos)
-                category = compiled.get("tender", {}).get("mainProcurementCategory", "")
-                if category not in self.PHARMA_CATEGORIES:
-                    continue
+                # Filtrado por categoría de adquisición (None = todas).
+                if self.ACCEPTED_CATEGORIES is not None:
+                    category = compiled.get("tender", {}).get("mainProcurementCategory", "")
+                    if category not in self.ACCEPTED_CATEGORIES:
+                        continue
 
                 ocid = rec.get("ocid", "")
                 if not ocid:

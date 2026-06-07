@@ -27,5 +27,6 @@ def test_extractors_init_with_client():
     assert bulk is not None
 
 
-def test_extractors_have_pharma_filter():
-    assert TargetedExtractor.PHARMA_CATEGORIES == {"goods"}
+def test_extractors_goods_filter():
+    # Solo bienes/medicamentos ("goods"). Configurable vía ACCEPTED_CATEGORIES.
+    assert TargetedExtractor.ACCEPTED_CATEGORIES == {"goods"}

@@ -7,7 +7,7 @@ python-dotenv>=1.0.0
 pandas>=2.0.0
 rapidfuzz>=3.6.0
 pyodbc>=5.0.0
-sqlalchemy>=2.0.0
+sqlalchemy>=1.4.0,<2.0.0
 xlrd>=2.0.1
 openpyxl>=3.1.0
 # pyarrow habilita los Pandas UDFs sobre Arrow. El límite superior evita que el

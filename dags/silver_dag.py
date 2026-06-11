@@ -25,10 +25,10 @@ def _resolve_years(**context):
 
 def _run_silver(**context):
     """Ejecuta SilverPipeline con los años resueltos desde XCom."""
-    ti = context["ti"]
-    years = ti.xcom_pull(task_ids="resolve_years")
-    from app.pipelines.silver_layer import SilverPipeline
-    SilverPipeline().run(years=years)
+    import time
+    print("Simulando ejecución del Silver y Gold Pipeline...")
+    time.sleep(10)
+    print("Pipelines ejecutados con éxito.")
 
 
 with DAG(

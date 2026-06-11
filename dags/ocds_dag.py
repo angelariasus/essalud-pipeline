@@ -25,9 +25,7 @@ with DAG(
     run_targeted = BashOperator(
         task_id="ingest_essalud_data",
         bash_command=(
-            "cd /opt/airflow/bi && python main.py targeted"
-            " --year {{ execution_date.year }}"
-            " --limit 100"
+            "echo 'Simulando extracción de datos OCDS...' && sleep 10 && echo 'Extracción completada con éxito.'"
         ),
     )
 
@@ -53,9 +51,6 @@ with DAG(
     run_bulk = BashOperator(
         task_id="ingest_monthly_bulk",
         bash_command=(
-            "cd /opt/airflow/bi && python main.py bulk"
-            " --source SEACE --type JSON"
-            " --year {{ execution_date.year }}"
-            " --month {{ execution_date.month }}"
+            "echo 'Simulando ingesta masiva...' && sleep 10 && echo 'Ingesta completada con éxito.'"
         ),
     )

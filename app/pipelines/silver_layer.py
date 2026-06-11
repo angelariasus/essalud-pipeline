@@ -65,6 +65,33 @@ class SilverPipeline:
                 logger.warning("No se encontraron datos Bronze para aplanar. Abortando.")
                 return
 
+            # 2.5 Limpieza con IA (Gemini API)
+            logger.info("Paso 2.5/4: Limpiando descripciones con Inteligencia Artificial...")
+            from app.services.ai_cleaner import GeminiCleaner
+            import pyspark.sql.functions as F
+            from pyspark.sql.types import StringType
+            
+            # Obtener descripciones únicas
+            unique_rows = flat_df.select("descripcion_item").distinct().collect()
+            raw_descs = [row.descripcion_item for row in unique_rows if row.descripcion_item]
+            
+            # Limpiar con Gemini
+            ai_cleaner = GeminiCleaner()
+            gemini_mapping = ai_cleaner.clean_descriptions(raw_descs)
+            
+            # Aplicar limpieza usando un UDF con Broadcast
+            gemini_mapping_bc = spark.sparkContext.broadcast(gemini_mapping)
+            
+            def _apply_ai_clean(desc):
+                return gemini_mapping_bc.value.get(desc, desc)
+            
+            ai_clean_udf = F.udf(_apply_ai_clean, StringType())
+            
+            flat_df = flat_df.withColumn(
+                "descripcion_item",
+                F.coalesce(ai_clean_udf(F.col("descripcion_item")), F.col("descripcion_item"))
+            )
+
             # 3. Construir dimensiones y resolver FKs (Spark).
             logger.info("Paso 3/4: Construyendo dimensiones (Spark)...")
             dims = resolve_all(flat_df, petitorio, establecimientos)

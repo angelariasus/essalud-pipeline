@@ -59,4 +59,8 @@ class Settings:
     MAX_RETRIES: int = int(os.getenv("OCDS_MAX_RETRIES", "5"))
     BACKOFF_FACTOR: float = float(os.getenv("OCDS_BACKOFF_FACTOR", "0.5"))
 
+    # Configuraciones de IA (Gemini API)
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
 settings = Settings()

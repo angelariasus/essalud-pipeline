@@ -125,3 +125,14 @@ dmypy.json
 # Local development
 local_config.py
 local_settings.py
+
+# =======================================================
+# ML Subproject (ml/)
+# =======================================================
+ml/.venv/
+ml/catboost_info/
+ml/Modelos/*.joblib
+ml/data/*.csv
+ml/data/*.parquet
+ml/data/*.png
+ml/.streamlit/secrets.toml

@@ -78,28 +78,46 @@ Bronze  ──►  Silver  ──►  Gold
 ```text
 essalud-pipeline/
 ├── app/
-│   ├── audit/          # Logger dual (consola INFO+, archivo DEBUG+)
-│   ├── clients/        # Cliente HTTP OCDS con retry/backoff
-│   ├── config/         # settings.py (env vars) + spark_session.py (singleton Spark)
-│   ├── loaders/        # master_loader (Excel) + dw_loader (DDL, JDBC staging, carga atómica)
-│   ├── models/         # Dataclasses: RecordSummary, CatalogItem, PaginationData
-│   ├── pipelines/      # BronzePipeline + SilverPipeline (orquestadores)
-│   ├── services/       # extractors, ocds_flattener (Spark), dim_resolver (Spark)
-│   ├── storage/        # FileManager (disco) + R2Manager (Cloudflare R2)
-│   └── utils/          # fuzzy_matcher (rapidfuzz + Pandas UDFs) + helpers
+│   ├── audit/              # Logger dual (consola INFO+, archivo DEBUG+)
+│   ├── clients/            # Cliente HTTP OCDS con retry/backoff
+│   ├── config/             # settings.py (env vars) + spark_session.py (singleton Spark)
+│   ├── loaders/
+│   │   ├── master_loader.py    # Petitorio + Establecimientos (Excel → pandas)
+│   │   ├── dw_loader.py        # DDL idempotente, JDBC staging, carga atómica
+│   │   └── targets/            # Abstracción de destinos Gold
+│   │       ├── base.py             # GoldTarget (ABC)
+│   │       ├── parquet_target.py   # ParquetGoldTarget (default)
+│   │       └── sqlserver_target.py # SqlServerTarget (envuelve dw_loader)
+│   ├── models/             # Dataclasses: RecordSummary, CatalogItem, PaginationData
+│   ├── pipelines/
+│   │   ├── bronze_layer.py     # BronzePipeline
+│   │   ├── silver_layer.py     # SilverPipeline (flatten→IA→CONOSCE→parquet)
+│   │   └── gold_layer.py       # GoldPipeline (read_staging→dims→target)
+│   ├── services/
+│   │   ├── extractors.py           # Targeted + Bulk extractors
+│   │   ├── ocds_flattener.py       # Aplanamiento Spark + read_staging()
+│   │   ├── ai_cleaner.py           # Limpieza con Gemini API
+│   │   ├── conosce_enricher.py     # Enriquecimiento con Excel CONOSCE (SEACE)
+│   │   ├── dim_resolver.py         # Dimensiones + Fact (fuzzy match, SKs)
+│   │   ├── static_dims.py          # Dim_Tiempo y Dim_Ubigeo como DataFrames Spark + export bi/
+│   │   └── synthetic_generator.py  # Datos sintéticos (2024 boost + 2025 CSV)
+│   ├── storage/            # FileManager (disco) + R2Manager (Cloudflare R2)
+│   └── utils/
+│       ├── fuzzy_matcher.py    # Pandas UDFs RapidFuzz (medicamentos + redes)
+│       └── cleaner.py          # Limpieza por capa (bronze/silver/gold)
 ├── dags/               # ocds_dag.py (targeted + bulk) · silver_dag.py (silver)
 ├── star-schema/        # DDL del modelo estrella + DDL staging y stored procedure
-├── extra-data/         # Maestros Excel: Petitorio (medicamentos) + Establecimientos (redes)
+├── extra-data/
+│   ├── Contratos/          # xlsx CONOSCE por año (2022–2025, ~63 000 filas)
+│   ├── CONOSCE_2025_essalud.csv  # Resumen EsSalud 2025 bienes (fuente synth)
+│   └── gemini_cache.json   # Caché local de respuestas Gemini
 ├── test/               # Suite pytest (incluye tests de integración Spark)
 ├── data/               # Data Lake local (bronze/ · silver/ · audit/) — ignorado por git
 ├── Dockerfile          # Imagen Airflow extendida con Java 17 (JRE) para PySpark
 ├── docker-compose.yaml # Stack Airflow: Postgres, Redis, Webserver, Scheduler, Worker
-├── main.py             # CLI entrypoint (targeted / bulk)
+├── main.py             # CLI Medallion (todos los subcomandos)
 ├── pytest.ini          # Config pytest (pythonpath = .)
-├── requirements.txt    # Dependencias runtime (requests, boto3, pyspark, rapidfuzz, pyodbc…)
-├── requirements-dev.txt# Dependencias dev (pytest, flake8, apache-airflow)
-├── CHANGELOG.md        # Historial detallado de cambios
-└── PLAN_MIGRACION_PYSPARK.md  # Plan de migración pandas → PySpark
+└── requirements.txt    # Dependencias runtime (requests, boto3, pyspark, rapidfuzz, pyodbc…)
 ```
 
 > **Nota:** la carpeta `data/` y los archivos de instrucciones de IA (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) están en `.gitignore` — ver [§13](#13-notas-de-versionado).
@@ -201,29 +219,78 @@ python main.py bulk --source SEACE --type JSON --year 2023 --month 11
 
 ---
 
-## 8. Uso — Capa Silver / Gold (PySpark)
+## 8. Uso — Capas Silver / Gold y orquestación (CLI)
 
-El `SilverPipeline` ejecuta el flujo completo: carga de maestros → aplanado Spark → construcción de dimensiones + resolución de FKs → carga atómica al DW.
+Cada capa se ejecuta por separado o integrada vía `main.py`. El destino Gold por
+defecto es **Parquet** (`data/gold/`), por lo que el flujo completo corre sin
+SQL Server. SQL Server queda como opt-in (`--target sqlserver`).
 
-> Requiere un **JRE 17+** disponible (PySpark).
+> Requiere **Java JDK 21** en `JAVA_HOME` (PySpark) y `HADOOP_HOME` en Windows.
 
 ```powershell
-# Pipeline completo (todos los años disponibles) + carga al DW
-python -c "from app.pipelines.silver_layer import SilverPipeline; SilverPipeline().run()"
+# Activar entorno virtual
+.venv\Scripts\Activate.ps1
 
-# Solo un año específico
-python -c "from app.pipelines.silver_layer import SilverPipeline; SilverPipeline().run(years=[2024])"
+# ── Flujo completo Bronze → Silver → Gold ────────────────────────
+python main.py run-all                              # Parquet Gold (default)
+python main.py run-all --target sqlserver --profile local  # carga al DW
 
-# Validar Silver sin una instancia de SQL Server (omite la carga al DW)
-python -c "from app.pipelines.silver_layer import SilverPipeline; SilverPipeline().run(years=[2024], load_dw=False)"
+# ── Por capas ─────────────────────────────────────────────────────
+python main.py silver                              # 4 pasos: flatten+IA+CONOSCE→staging_flat
+python main.py silver --years 2022 2023            # solo esos años
+python main.py gold                                # Parquet data/gold/ + bi/ (6 tablas, sin SQL Server)
+python main.py gold   --target sqlserver           # carga Star Schema en SQL Server + bi/
+
+# ── Datos sintéticos (corre entre silver y gold) ─────────────────
+python main.py synth                               # defaults: 2025=2176, 2024=2370
+python main.py synth --adicional-rate 0.2          # más adendas para señal ML
+python main.py gold  --target sqlserver            # carga los ~9 292 registros totales
+
+# ── Reconstrucción / limpieza ────────────────────────────────────
+python main.py silver --rebuild                    # limpia staging y reprocesa
+python main.py gold   --rebuild --target sqlserver # re-DDL idempotente + carga
+python main.py clean  silver                       # borra solo data/silver/staging_flat
+python main.py clean  bronze --yes                 # borra Bronze (requiere --yes)
 ```
 
-Lo que ejecuta el pipeline:
+Lo que ejecuta cada capa:
 
-1. **Carga de maestros:** Petitorio de medicamentos + Establecimientos/Redes (Excel, pandas).
-2. **Aplanado (Spark):** lee los JSON Bronze → una fila por ítem de tender → Parquet particionado por `anio_fiscal` en `data/silver/staging_flat/`.
-3. **Dimensiones + FKs (Spark):** construye `Dim_*`, resuelve claves foráneas con SKs deterministas y fuzzy matching vectorizado (Pandas UDFs con maestros en *broadcast*).
-4. **Carga al DW (Gold):** escribe a `stg.*` por JDBC → invoca `oro.usp_Load_From_Staging` (carga atómica).
+- **Silver** (`silver`): aplana Bronze (una fila por ítem) → limpieza IA con Gemini
+  → enriquecimiento CONOSCE (adendas, nombre de contrato, fecha de suscripción) →
+  escribe Parquet particionado por `anio_fiscal` en `data/silver/staging_flat/`
+  (overwrite **dinámico**: reprocesar un año no borra los demás).
+- **Gold** (`gold`): lee `staging_flat` → construye `Dim_*` + `Fact` (SKs
+  deterministas + fuzzy matching vectorizado) → carga en el destino elegido
+  (`GoldTarget`): Parquet (`data/gold/`) o SQL Server (`stg.*` por JDBC →
+  `oro.usp_Load_From_Staging`, carga atómica).
+
+### Datos sintéticos (`synth`)
+
+El Bronze real concentra la actividad en 2022-2023 (el `anio_fiscal` sale de la
+fecha de convocatoria), por lo que **Silver casi no produce filas para 2024 (58)
+ni 2025 (0)**; además los contratos OCDS reales no traen adendas
+(`Monto_Adicional = 0` hasta que CONOSCE los enriquece). El comando `synth`
+(separado de `silver`) genera datos sintéticos **fieles** a partir de
+**`extra-data/CONOSCE_2025_essalud.csv`** (datos reales de EsSalud 2025, bienes):
+
+- **2025**: ~2 176 filas extraídas del CSV (conserva las adendas reales).
+- **2024**: se lleva a 2 370 filas (58 reales + bootstrap del Silver real, ocids
+  realistas indistinguibles de los reales).
+- **`monto_adicional` 2022-2024**: el modelo preserva los valores reales que
+  CONOSCE ya enriqueció en Silver (JOIN por contrato); solo aplica la ocurrencia
+  escalada (`--adicional-rate`, default `0.15`, ratios reales ≤ 25%) a las filas
+  que aún tienen `monto_adicional = 0`. 2025 conserva sus adendas reales del CSV.
+
+El resultado total en `staging_flat` es **~9 292 filas** (2022=2 274, 2023=2 472,
+2024=2 370, 2025=2 176) listas para cargarse con `gold --target sqlserver`.
+
+> **`data/bi/` en cualquier destino**: `python main.py gold` y
+> `gold --target sqlserver` generan ambos las **6 tablas completas** en
+> `data/bi/*.parquet` (`Dim_Tiempo`, `Dim_Ubigeo`, `Dim_Entidad_Compradora`,
+> `Dim_Medicamento`, `Dim_Proveedor`, `Fact_Ordenes_Y_Contratos`).
+> `Dim_Tiempo` y `Dim_Ubigeo` se construyen desde `static_dims.py` (sin leer
+> SQL Server), por lo que cualquier equipo puede generar los Parquet BI con
+> solo Spark. `--target sqlserver` además carga el esquema `oro` del DW.
 
 ---
 
@@ -234,10 +301,27 @@ El esquema Gold vive en SQL Server bajo el esquema `oro` y se define en `star-sc
 | Archivo | Contenido |
 |---|---|
 | `EsSalud_StarSchema_DDL.sql` | Modelo estrella completo: dimensiones + tabla de hechos + vistas analíticas + validación post-carga |
-| `EsSalud_Staging_DDL.sql` | Esquema `stg` + `oro.usp_Load_From_Staging` (carga atómica transaccional) |
+| `EsSalud_Staging_DDL.sql` | DROP `stg.*` + `CREATE OR ALTER PROCEDURE oro.usp_Load_From_Staging` (carga atómica transaccional) |
 
-**Dimensiones:** `Dim_Tiempo`, `Dim_Ubigeo`, `Dim_Entidad_Compradora`, `Dim_Medicamento`, `Dim_Proveedor`, `Dim_Tipo_Proceso`.
-**Hechos:** `Fact_Ordenes_Y_Contratos`.
+**Dimensiones:** `Dim_Tiempo`, `Dim_Ubigeo`, `Dim_Entidad_Compradora`, `Dim_Medicamento`, `Dim_Proveedor`, `Dim_Tipo_Proceso`.  
+**Hechos:** `Fact_Ordenes_Y_Contratos` (35 columnas, ~9 292 filas con datos sintéticos incluidos).
+
+**Métricas de la Fact:**
+
+| Columna | Descripción |
+|---|---|
+| `Num_Contrato` | Nombre oficial del contrato (del CONOSCE) |
+| `Cantidad_Adjudicada` | Unidades adjudicadas por ítem |
+| `Monto_Referencial_Soles` | Valor estimado de la convocatoria |
+| `Monto_Adjudicado_Soles` | Valor de la buena pro |
+| `Monto_Contratado_Item` | Valor firmado en contrato |
+| `Monto_Adicional` | Suma de adendas aprobadas (CONOSCE) |
+| `Monto_Reduccion` / `Monto_Prorroga` / `Monto_Complementario` | Otros ajustes contractuales (CONOSCE) |
+| `Ratio_Sobrecosto_Pct` | `(Monto_Adicional / Monto_Contratado) * 100` |
+| `Lead_Time_Total_Dias` | Días entre convocatoria y suscripción |
+| `Flag_Contratacion_Directa` | 1 si es contratación directa |
+| `Flag_Tiene_Adenda` | 1 si `Monto_Adicional > 0` |
+| `Flag_Fuera_Petitorio` | 1 si el ítem no está en el Petitorio 2026 |
 
 **Vistas analíticas (Gold):**
 

@@ -20,6 +20,17 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'stg')
     EXEC('CREATE SCHEMA stg');
 GO
 
+/* Limpiar tablas stg.* del ciclo anterior para que el SP se compile
+   con resolución diferida (deferred name resolution). Si las tablas
+   stg.* existen con el schema viejo, SQL Server las valida al hacer
+   CREATE OR ALTER PROCEDURE y falla cuando los nombres de columna
+   cambiaron. Spark las recrea en el paso siguiente (write_all_staging). */
+DROP TABLE IF EXISTS stg.Fact_Ordenes_Y_Contratos;
+DROP TABLE IF EXISTS stg.Dim_Entidad_Compradora;
+DROP TABLE IF EXISTS stg.Dim_Medicamento;
+DROP TABLE IF EXISTS stg.Dim_Proveedor;
+GO
+
 /* ------------------------------------------------------------
    Carga atómica de Staging -> Producción.
    Resolución diferida de nombres: las tablas stg.* las crea Spark
@@ -67,19 +78,27 @@ BEGIN
         -- ── Fact_Ordenes_Y_Contratos (SK_Hecho es IDENTITY automática) ──
         INSERT INTO oro.Fact_Ordenes_Y_Contratos
             (FK_Tiempo_Convocatoria, FK_Tiempo_Buena_Pro, FK_Tiempo_Suscripcion,
-             FK_Tiempo_Emision_OC, FK_Entidad, FK_Medicamento, FK_Proveedor,
+             FK_Entidad, FK_Medicamento, FK_Proveedor,
              FK_Tipo_Proceso, FK_Ubigeo_Item, Fecha_Convocatoria, Fecha_Buena_Pro,
-             Fecha_Suscripcion, Fecha_Emision_OC, N_Item, Cantidad_Adjudicada,
+             Fecha_Suscripcion,
+             Codigo_Convocatoria, N_Item, N_Cod_Contrato,
+             Num_Contrato,
+             Cantidad_Adjudicada,
              Monto_Referencial_Soles, Monto_Adjudicado_Soles, Monto_Contratado_Item,
-             Monto_Adicional, Monto_Total_OC, Flag_Contratacion_Directa,
-             Flag_Fuera_Petitorio, Estado_Item, Moneda_Original, Fuente_Dataset, Anio_Fiscal)
+             Monto_Adicional, Monto_Reduccion, Monto_Prorroga, Monto_Complementario,
+             Flag_Contratacion_Directa,
+             Flag_Fuera_Petitorio, Moneda_Original, Fuente_Dataset, Anio_Fiscal)
         SELECT FK_Tiempo_Convocatoria, FK_Tiempo_Buena_Pro, FK_Tiempo_Suscripcion,
-               FK_Tiempo_Emision_OC, FK_Entidad, FK_Medicamento, FK_Proveedor,
+               FK_Entidad, FK_Medicamento, FK_Proveedor,
                FK_Tipo_Proceso, FK_Ubigeo_Item, Fecha_Convocatoria, Fecha_Buena_Pro,
-               Fecha_Suscripcion, Fecha_Emision_OC, N_Item, Cantidad_Adjudicada,
+               Fecha_Suscripcion,
+               Codigo_Convocatoria, N_Item, N_Cod_Contrato,
+               Num_Contrato,
+               Cantidad_Adjudicada,
                Monto_Referencial_Soles, Monto_Adjudicado_Soles, Monto_Contratado_Item,
-               Monto_Adicional, Monto_Total_OC, Flag_Contratacion_Directa,
-               Flag_Fuera_Petitorio, Estado_Item, Moneda_Original, Fuente_Dataset, Anio_Fiscal
+               Monto_Adicional, Monto_Reduccion, Monto_Prorroga, Monto_Complementario,
+               Flag_Contratacion_Directa,
+               Flag_Fuera_Petitorio, Moneda_Original, Fuente_Dataset, Anio_Fiscal
         FROM stg.Fact_Ordenes_Y_Contratos;
 
         COMMIT TRANSACTION;

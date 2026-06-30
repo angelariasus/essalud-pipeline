@@ -224,9 +224,15 @@ def make_match_medicamento_udf(broadcast_choices):
                 dcis.append(None)
                 scores.append(0.0)
                 metodos.append(f"ERROR: {exc}")
-        return pd.DataFrame(
-            {"dci": dcis, "score": pd.Series(scores, dtype="float64"), "metodo": metodos}
-        )
+        # dtype=object explícito en las columnas string: pandas 3.0 infiere por
+        # defecto el dtype `str` respaldado por Arrow `large_string`, que no
+        # coincide con el `string` esperado por el esquema Spark del UDF y
+        # crashea el worker (ArrowInvalid: large_string vs string).
+        return pd.DataFrame({
+            "dci": pd.Series(dcis, dtype=object),
+            "score": pd.Series(scores, dtype="float64"),
+            "metodo": pd.Series(metodos, dtype=object),
+        })
 
     return _udf
 
@@ -252,9 +258,14 @@ def make_match_red_udf(broadcast_choices):
                 res = match_red_asistencial(cand, choices)
                 reds.append(res["red"])
                 scores.append(float(res["score"]))
-            except Exception as exc:  # noqa: BLE001 - fail-safe por elemento
+            except Exception:  # noqa: BLE001 - fail-safe por elemento
                 reds.append(None)
                 scores.append(0.0)
-        return pd.DataFrame({"red": reds, "score": pd.Series(scores, dtype="float64")})
+        # dtype=object explícito: ver nota en make_match_medicamento_udf
+        # (pandas 3.0 -> large_string incompatible con el esquema Spark).
+        return pd.DataFrame({
+            "red": pd.Series(reds, dtype=object),
+            "score": pd.Series(scores, dtype="float64"),
+        })
 
     return _udf

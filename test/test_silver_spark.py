@@ -173,3 +173,33 @@ def test_fuzzy_udf_graceful_degradation(spark):
     df = spark.createDataFrame([("PARACETAMOL",), ("AMOXICILINA",)], ["desc"]).repartition(1)
     metodos = [r["metodo"] for r in df.withColumn("m", bad_udf(F.col("desc"))).select("m.metodo").collect()]
     assert all(m and m.startswith("ERROR") for m in metodos)  # job no aborta
+
+
+# ── Regresión: pandas 3.0 large_string en el struct de los Pandas UDFs ────────
+def test_fuzzy_udf_no_large_string_crash(spark):
+    """
+    pandas 3.0 infiere dtype `str` (Arrow large_string) en el DataFrame de retorno
+    del UDF, que no coincide con el `string` del esquema Spark y crashea el worker
+    (ArrowInvalid: large_string vs string). Los UDFs fuerzan dtype=object para
+    evitarlo; este test reproduce el escenario que fallaba (sin workaround de conf).
+    """
+    from pyspark.sql import functions as F
+    from app.utils.fuzzy_matcher import make_match_medicamento_udf, make_match_red_udf
+
+    med_udf = make_match_medicamento_udf(
+        spark.sparkContext.broadcast(["PARACETAMOL", "AMOXICILINA"])
+    )
+    red_udf = make_match_red_udf(
+        spark.sparkContext.broadcast(["RED ASISTENCIAL MOQUEGUA"])
+    )
+    df = spark.createDataFrame(
+        [("PARACETAMOL 500 MG", "RED ASISTENCIAL MOQUEGUA")], ["desc", "red"]
+    ).repartition(1)
+
+    # No debe lanzar ArrowInvalid; el struct se materializa con tipos string.
+    rows = df.select(
+        med_udf(F.col("desc")).alias("m"), red_udf(F.col("red")).alias("r")
+    ).collect()
+    assert rows[0]["m"]["dci"] == "PARACETAMOL"
+    assert rows[0]["m"]["metodo"] in ("EXACTO", "FUZZY")
+    assert rows[0]["r"]["red"] == "RED ASISTENCIAL MOQUEGUA"

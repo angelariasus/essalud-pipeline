@@ -21,6 +21,11 @@ class Settings:
     DATA_DIR: Path = PROJECT_ROOT / "data"
     BRONZE_DIR: Path = Path(os.getenv("OCDS_BRONZE_DIR", str(DATA_DIR / "bronze")))
     SILVER_DIR: Path = Path(os.getenv("OCDS_SILVER_DIR", str(DATA_DIR / "silver")))
+    # Capa Gold materializada en Parquet (destino por defecto, sin SQL Server).
+    GOLD_DIR: Path = Path(os.getenv("OCDS_GOLD_DIR", str(DATA_DIR / "gold")))
+    # Carpeta para Power BI: export de las tablas oro.* del DW a Parquet (incluye
+    # Dim_Tiempo y Dim_Ubigeo, que las genera el DDL de SQL Server).
+    BI_DIR: Path = Path(os.getenv("OCDS_BI_DIR", str(PROJECT_ROOT / "bi")))
     EXTRA_DATA_DIR: Path = Path(os.getenv("OCDS_EXTRA_DATA_DIR", str(PROJECT_ROOT / "extra-data")))
     AUDIT_DIR: Path = DATA_DIR / "audit"
     EXECUTIONS_DIR: Path = AUDIT_DIR / "executions"
@@ -44,6 +49,14 @@ class Settings:
     DW_JDBC_PASSWORD: str = os.getenv("OCDS_DW_JDBC_PASSWORD", "")
     DW_JDBC_BATCHSIZE: int = int(os.getenv("OCDS_DW_JDBC_BATCHSIZE", "10000"))
 
+    # Perfil "docker": cadenas alternas para apuntar a una instancia SQL Server en
+    # contenedor (se eligen con `gold --target sqlserver --profile docker`). Si no
+    # se definen, el perfil docker cae a las cadenas estándar de arriba.
+    DW_CONN_STRING_DOCKER: str = os.getenv("OCDS_DW_CONN_STRING_DOCKER", "")
+    DW_JDBC_URL_DOCKER: str = os.getenv("OCDS_DW_JDBC_URL_DOCKER", "")
+    DW_JDBC_USER_DOCKER: str = os.getenv("OCDS_DW_JDBC_USER_DOCKER", "")
+    DW_JDBC_PASSWORD_DOCKER: str = os.getenv("OCDS_DW_JDBC_PASSWORD_DOCKER", "")
+
     # Spark (capas Silver/Gold). El driver JDBC se inyecta por env para no
     # depender de la red en pruebas/uso offline (ver app/config/spark_session.py).
     # Default local[4]: en Windows, spawnear muchos workers de Python (UDFs)
@@ -61,6 +74,6 @@ class Settings:
 
     # Configuraciones de IA (Gemini API)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 settings = Settings()

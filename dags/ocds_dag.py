@@ -1,7 +1,19 @@
-from airflow import DAG
-from airflow.operators.bash import BashOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+"""
+DAGs de la capa Bronze (ingesta OCDS de EsSalud).
+
+Los callables importan `app.*` de forma diferida (dentro de la función, no a nivel
+de módulo): Airflow parsea los DAGs con frecuencia y los imports pesados
+(pyspark, boto3, ...) no deben ejecutarse en el parseo. El proyecto se monta en
+`/opt/airflow/bi` (ver docker-compose), por eso se añade al `sys.path`.
+"""
+import sys
 from datetime import datetime, timedelta
+
+sys.path.append("/opt/airflow/bi")
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 default_args = {
     "owner": "data_engineer",
@@ -11,6 +23,52 @@ default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
 }
+
+DEFAULT_YEARS = [2022, 2023, 2024, 2025]
+
+
+def _run_bronze_targeted(**context):
+    """Ingesta Bronze dirigida por RUC/años (override vía dag_run.conf)."""
+    from app.config.settings import settings
+    from app.pipelines.bronze_layer import BronzePipeline
+
+    dag_run = context.get("dag_run")
+    conf = (dag_run.conf if dag_run and dag_run.conf else {}) or {}
+    ruc = conf.get("ruc", settings.ESSALUD_RUC)
+    limit = int(conf.get("limit", 0))
+    if conf.get("years"):
+        years = list(conf["years"])
+    elif conf.get("year"):
+        years = [conf["year"]]
+    else:
+        years = DEFAULT_YEARS
+
+    pipeline = BronzePipeline()
+    try:
+        for year in years:
+            pipeline.run_targeted_ingestion(ruc=ruc, limit=limit, year=year)
+    finally:
+        pipeline.close()
+
+
+def _run_bronze_bulk(**context):
+    """Descarga el archivo masivo mensual (override vía dag_run.conf)."""
+    from app.pipelines.bronze_layer import BronzePipeline
+
+    dag_run = context.get("dag_run")
+    conf = (dag_run.conf if dag_run and dag_run.conf else {}) or {}
+    now = datetime.utcnow()
+    pipeline = BronzePipeline()
+    try:
+        pipeline.run_bulk_ingestion(
+            source=conf.get("source", "SEACE"),
+            file_type=conf.get("type", "JSON"),
+            year=int(conf.get("year", now.year)),
+            month=int(conf.get("month", now.month)),
+        )
+    finally:
+        pipeline.close()
+
 
 with DAG(
     "ocds_targeted_ingestion",
@@ -22,11 +80,9 @@ with DAG(
     tags=["ocds", "bronze", "essalud"],
 ) as dag:
 
-    run_targeted = BashOperator(
+    run_targeted = PythonOperator(
         task_id="ingest_essalud_data",
-        bash_command=(
-            "echo 'Simulando extracción de datos OCDS...' && sleep 10 && echo 'Extracción completada con éxito.'"
-        ),
+        python_callable=_run_bronze_targeted,
     )
 
     trigger_silver = TriggerDagRunOperator(
@@ -48,9 +104,7 @@ with DAG(
     tags=["ocds", "bronze", "bulk"],
 ) as dag_bulk:
 
-    run_bulk = BashOperator(
+    run_bulk = PythonOperator(
         task_id="ingest_monthly_bulk",
-        bash_command=(
-            "echo 'Simulando ingesta masiva...' && sleep 10 && echo 'Ingesta completada con éxito.'"
-        ),
+        python_callable=_run_bronze_bulk,
     )

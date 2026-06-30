@@ -49,6 +49,7 @@ _ITEM = StructType([
     StructField("unit", _UNIT),
 ])
 _TENDER = StructType([
+    StructField("id", StringType()),
     StructField("title", StringType()),
     StructField("description", StringType()),
     StructField("procurementMethod", StringType()),
@@ -282,6 +283,8 @@ def flatten_dataframe(df_valid: DataFrame) -> DataFrame:
 
     flat = exp.select(
         F.col("ocid"),
+        tender["id"].cast("long").alias("codigo_convocatoria"),
+        F.col("_contract")["id"].cast("long").alias("n_cod_contrato"),
         F.col("_item_id").alias("n_item"),
         F.col("item")["description"].alias("descripcion_item"),
         F.col("item")["quantity"].alias("cantidad"),
@@ -358,14 +361,74 @@ def flatten_year(
     return flatten_paths(spark, [_as_dir(directory)])
 
 
-def write_staging(df: DataFrame, path: Optional[Path] = None) -> Path:
-    """Escribe el aplanado a Parquet particionado por anio_fiscal (Silver staging)."""
-    path = path or (settings.SILVER_DIR / "staging_flat")
+STAGING_FLAT_DIRNAME = "staging_flat"
+
+
+def staging_flat_path(path: Optional[Path] = None) -> Path:
+    """Ruta del staging Parquet de Silver (default `SILVER_DIR/staging_flat`)."""
+    return path or (settings.SILVER_DIR / STAGING_FLAT_DIRNAME)
+
+
+def write_staging(
+    df: DataFrame, path: Optional[Path] = None, dynamic_partitions: bool = True
+) -> Path:
+    """
+    Escribe el aplanado a Parquet particionado por `anio_fiscal` (Silver staging).
+
+    Args:
+        dynamic_partitions: si True (default), usa
+            `partitionOverwriteMode=dynamic`, de modo que `mode("overwrite")`
+            reemplace SOLO las particiones (`anio_fiscal`) presentes en `df` y
+            conserve las demás. Así escribir un año (o las filas sintéticas de
+            2025) no borra los años ya materializados. Con False se mantiene el
+            overwrite estático (reemplaza todo el directorio).
+    """
+    path = staging_flat_path(path)
     path.mkdir(parents=True, exist_ok=True)
     out = str(path).replace("\\", "/")
-    logger.info(f"Escribiendo staging Parquet particionado -> {out}")
-    df.write.mode("overwrite").partitionBy("anio_fiscal").parquet(out)
+    spark = df.sparkSession
+    prev_mode = spark.conf.get("spark.sql.sources.partitionOverwriteMode", "static")
+    try:
+        spark.conf.set(
+            "spark.sql.sources.partitionOverwriteMode",
+            "dynamic" if dynamic_partitions else "static",
+        )
+        logger.info(
+            f"Escribiendo staging Parquet particionado ({'dynamic' if dynamic_partitions else 'static'}) -> {out}"
+        )
+        df.write.mode("overwrite").partitionBy("anio_fiscal").parquet(out)
+    finally:
+        spark.conf.set("spark.sql.sources.partitionOverwriteMode", prev_mode)
     return path
+
+
+def read_staging(
+    spark: SparkSession,
+    years: Optional[Sequence[int]] = None,
+    path: Optional[Path] = None,
+) -> DataFrame:
+    """
+    Lee el staging Parquet de Silver (la frontera Silver→Gold).
+
+    Args:
+        spark: sesión de Spark.
+        years: si se indica, filtra `anio_fiscal IN years`; None lee todo.
+        path: directorio del staging (default `SILVER_DIR/staging_flat`).
+
+    Returns:
+        DataFrame con el mismo esquema del aplanado (incluye `anio_fiscal`). Si el
+        staging no existe, devuelve un DataFrame vacío con el esquema de salida.
+    """
+    staging = staging_flat_path(path)
+    if not staging.exists():
+        logger.warning(f"Staging Silver inexistente: {staging}")
+        return _empty_flat(spark)
+    out = str(staging).replace("\\", "/")
+    logger.info(f"Leyendo staging Silver desde: {out}")
+    df = spark.read.parquet(out)
+    if years:
+        df = df.filter(F.col("anio_fiscal").isin(list(years)))
+    return df
 
 
 def flatten_all(

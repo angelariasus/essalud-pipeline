@@ -143,6 +143,8 @@ CREATE TABLE oro.Dim_Ubigeo (
     Region_Natural VARCHAR(20)  NOT NULL,      -- COSTA / SIERRA / SELVA
     Macroregion    VARCHAR(30)  NOT NULL,      -- NORTE / CENTRO / SUR / ORIENTE
     Nivel_Geo      VARCHAR(15)  NOT NULL,      -- 'DEPARTAMENTO' / 'DISTRITO'
+    Latitud        DECIMAL(9,6) NULL,          -- coord. de la capital (para mapas Power BI)
+    Longitud       DECIMAL(9,6) NULL,          -- coord. de la capital (para mapas Power BI)
     CONSTRAINT PK_Dim_Ubigeo PRIMARY KEY CLUSTERED (SK_Ubigeo)
 );
 GO
@@ -154,40 +156,41 @@ CREATE NONCLUSTERED INDEX IX_Ubigeo_Codigo
 -- Registro centinela
 SET IDENTITY_INSERT oro.Dim_Ubigeo ON;
 INSERT INTO oro.Dim_Ubigeo
-    (SK_Ubigeo,Ubigeo,Departamento,Provincia,Distrito,Region_Natural,Macroregion,Nivel_Geo)
-VALUES (-1,NULL,'SIN UBICACION',NULL,NULL,'SIN DATO','SIN DATO','DEPARTAMENTO');
+    (SK_Ubigeo,Ubigeo,Departamento,Provincia,Distrito,Region_Natural,Macroregion,Nivel_Geo,Latitud,Longitud)
+VALUES (-1,NULL,'SIN UBICACION',NULL,NULL,'SIN DATO','SIN DATO','DEPARTAMENTO',NULL,NULL);
 SET IDENTITY_INSERT oro.Dim_Ubigeo OFF;
 GO
 
 -- 25 departamentos precargados (nivel DEPARTAMENTO → para FK_Ubigeo_Item)
+-- Latitud/Longitud = coordenadas de la capital del departamento (para mapas Power BI).
 INSERT INTO oro.Dim_Ubigeo
-    (Ubigeo,Departamento,Region_Natural,Macroregion,Nivel_Geo)
+    (Ubigeo,Departamento,Region_Natural,Macroregion,Nivel_Geo,Latitud,Longitud)
 VALUES
-    ('010000','AMAZONAS',     'SELVA',  'NORTE',   'DEPARTAMENTO'),
-    ('020000','ANCASH',       'SIERRA', 'CENTRO',  'DEPARTAMENTO'),
-    ('030000','APURIMAC',     'SIERRA', 'SUR',     'DEPARTAMENTO'),
-    ('040000','AREQUIPA',     'SIERRA', 'SUR',     'DEPARTAMENTO'),
-    ('050000','AYACUCHO',     'SIERRA', 'SUR',     'DEPARTAMENTO'),
-    ('060000','CAJAMARCA',    'SIERRA', 'NORTE',   'DEPARTAMENTO'),
-    ('070000','CALLAO',       'COSTA',  'CENTRO',  'DEPARTAMENTO'),
-    ('080000','CUSCO',        'SIERRA', 'SUR',     'DEPARTAMENTO'),
-    ('090000','HUANCAVELICA', 'SIERRA', 'CENTRO',  'DEPARTAMENTO'),
-    ('100000','HUANUCO',      'SIERRA', 'CENTRO',  'DEPARTAMENTO'),
-    ('110000','ICA',          'COSTA',  'SUR',     'DEPARTAMENTO'),
-    ('120000','JUNIN',        'SIERRA', 'CENTRO',  'DEPARTAMENTO'),
-    ('130000','LA LIBERTAD',  'COSTA',  'NORTE',   'DEPARTAMENTO'),
-    ('140000','LAMBAYEQUE',   'COSTA',  'NORTE',   'DEPARTAMENTO'),
-    ('150000','LIMA',         'COSTA',  'CENTRO',  'DEPARTAMENTO'),
-    ('160000','LORETO',       'SELVA',  'ORIENTE', 'DEPARTAMENTO'),
-    ('170000','MADRE DE DIOS','SELVA',  'ORIENTE', 'DEPARTAMENTO'),
-    ('180000','MOQUEGUA',     'SIERRA', 'SUR',     'DEPARTAMENTO'),
-    ('190000','PASCO',        'SIERRA', 'CENTRO',  'DEPARTAMENTO'),
-    ('200000','PIURA',        'COSTA',  'NORTE',   'DEPARTAMENTO'),
-    ('210000','PUNO',         'SIERRA', 'SUR',     'DEPARTAMENTO'),
-    ('220000','SAN MARTIN',   'SELVA',  'NORTE',   'DEPARTAMENTO'),
-    ('230000','TACNA',        'SIERRA', 'SUR',     'DEPARTAMENTO'),
-    ('240000','TUMBES',       'COSTA',  'NORTE',   'DEPARTAMENTO'),
-    ('250000','UCAYALI',      'SELVA',  'ORIENTE', 'DEPARTAMENTO');
+    ('010000','AMAZONAS',     'SELVA',  'NORTE',   'DEPARTAMENTO',  -6.229806, -77.871810),  -- Chachapoyas
+    ('020000','ANCASH',       'SIERRA', 'CENTRO',  'DEPARTAMENTO',  -9.529782, -77.527593),  -- Huaraz
+    ('030000','APURIMAC',     'SIERRA', 'SUR',     'DEPARTAMENTO', -13.633919, -72.881418),  -- Abancay
+    ('040000','AREQUIPA',     'SIERRA', 'SUR',     'DEPARTAMENTO', -16.409047, -71.537451),  -- Arequipa
+    ('050000','AYACUCHO',     'SIERRA', 'SUR',     'DEPARTAMENTO', -13.158850, -74.223235),  -- Ayacucho
+    ('060000','CAJAMARCA',    'SIERRA', 'NORTE',   'DEPARTAMENTO',  -7.163710, -78.512796),  -- Cajamarca
+    ('070000','CALLAO',       'COSTA',  'CENTRO',  'DEPARTAMENTO', -12.056503, -77.118221),  -- Callao
+    ('080000','CUSCO',        'SIERRA', 'SUR',     'DEPARTAMENTO', -13.531950, -71.967463),  -- Cusco
+    ('090000','HUANCAVELICA', 'SIERRA', 'CENTRO',  'DEPARTAMENTO', -12.786773, -74.976237),  -- Huancavelica
+    ('100000','HUANUCO',      'SIERRA', 'CENTRO',  'DEPARTAMENTO',  -9.930640, -76.242199),  -- Huánuco
+    ('110000','ICA',          'COSTA',  'SUR',     'DEPARTAMENTO', -14.067750, -75.728623),  -- Ica
+    ('120000','JUNIN',        'SIERRA', 'CENTRO',  'DEPARTAMENTO', -12.065286, -75.204813),  -- Huancayo
+    ('130000','LA LIBERTAD',  'COSTA',  'NORTE',   'DEPARTAMENTO',  -8.111599, -79.028830),  -- Trujillo
+    ('140000','LAMBAYEQUE',   'COSTA',  'NORTE',   'DEPARTAMENTO',  -6.771370, -79.840880),  -- Chiclayo
+    ('150000','LIMA',         'COSTA',  'CENTRO',  'DEPARTAMENTO', -12.046374, -77.042793),  -- Lima
+    ('160000','LORETO',       'SELVA',  'ORIENTE', 'DEPARTAMENTO',  -3.743700, -73.251640),  -- Iquitos
+    ('170000','MADRE DE DIOS','SELVA',  'ORIENTE', 'DEPARTAMENTO', -12.593320, -69.189215),  -- Puerto Maldonado
+    ('180000','MOQUEGUA',     'SIERRA', 'SUR',     'DEPARTAMENTO', -17.193387, -70.935645),  -- Moquegua
+    ('190000','PASCO',        'SIERRA', 'CENTRO',  'DEPARTAMENTO', -10.682886, -76.256145),  -- Cerro de Pasco
+    ('200000','PIURA',        'COSTA',  'NORTE',   'DEPARTAMENTO',  -5.194490, -80.632820),  -- Piura
+    ('210000','PUNO',         'SIERRA', 'SUR',     'DEPARTAMENTO', -15.840221, -70.021879),  -- Puno
+    ('220000','SAN MARTIN',   'SELVA',  'NORTE',   'DEPARTAMENTO',  -6.034432, -76.971700),  -- Moyobamba
+    ('230000','TACNA',        'SIERRA', 'SUR',     'DEPARTAMENTO', -18.006540, -70.246360),  -- Tacna
+    ('240000','TUMBES',       'COSTA',  'NORTE',   'DEPARTAMENTO',  -3.566880, -80.451530),  -- Tumbes
+    ('250000','UCAYALI',      'SELVA',  'ORIENTE', 'DEPARTAMENTO',  -8.379150, -74.553870);  -- Pucallpa
 -- Los registros nivel DISTRITO se cargan en Capa Plata desde [6]
 GO
 
@@ -348,7 +351,7 @@ GO
 --   no considera determinístico y no permite PERSISTED.
 --
 --   SOLUCIÓN: agregar columnas DATE reales (Fecha_Convocatoria,
---   Fecha_Buena_Pro, Fecha_Suscripcion, Fecha_Emision_OC).
+--   Fecha_Buena_Pro, Fecha_Suscripcion).
 --   El ETL de Python las carga junto con el SK_Tiempo.
 --   DATEDIFF sobre columnas DATE es 100% determinístico → PERSISTED OK.
 --
@@ -370,12 +373,11 @@ GO
 CREATE TABLE oro.Fact_Ordenes_Y_Contratos (
     SK_Hecho                 BIGINT        NOT NULL IDENTITY(1,1),
 
-    -- ── Claves foráneas (9 en total) ──────────────────────────
+    -- ── Claves foráneas (8 en total) ──────────────────────────
     -- Temporales → Dim_Tiempo
     FK_Tiempo_Convocatoria   INT           NOT NULL DEFAULT -1,
     FK_Tiempo_Buena_Pro      INT           NOT NULL DEFAULT -1,
     FK_Tiempo_Suscripcion    INT           NOT NULL DEFAULT -1,
-    FK_Tiempo_Emision_OC     INT           NOT NULL DEFAULT -1,
     -- Dimensiones
     FK_Entidad               INT           NOT NULL DEFAULT -1,  -- → Dim_Entidad_Compradora
     FK_Medicamento           INT           NOT NULL DEFAULT -1,  -- → Dim_Medicamento
@@ -395,18 +397,12 @@ CREATE TABLE oro.Fact_Ordenes_Y_Contratos (
     Fecha_Convocatoria       DATE          NULL,   -- Adjudicacion.FECHA_CONVOCATORIA  [1][2]
     Fecha_Buena_Pro          DATE          NULL,   -- Adjudicacion.FECHA_BUENAPRO       [1][2]
     Fecha_Suscripcion        DATE          NULL,   -- Contratos.FECHA_SUSCRIPCION_CONTRATO [3]
-    Fecha_Emision_OC         DATE          NULL,   -- OrdenesServicios.FECHA_DE_EMISION [4]
 
     -- ── Claves naturales (trazabilidad SEACE) ─────────────────
     Codigo_Convocatoria      BIGINT        NULL,   -- CODIGOCONVOCATORIA [1][2][3]
     N_Item                   SMALLINT      NULL,   -- N_ITEM [1][2] / NUM_ITEM [3]
     N_Cod_Contrato           BIGINT        NULL,   -- N_COD_CONTRATO [3]
-    Num_Contrato             VARCHAR(50)   NULL,   -- NUM_CONTRATO [3]
-    Tiene_Resolucion         CHAR(2)       NULL,   -- TIENERESOLOCION [3]
-    -- OC: sin CODIGOCONVOCATORIA → join en ETL por RUC_ENTIDAD + Anio_Fiscal
-    Nro_Orden_Compra         VARCHAR(20)   NULL,   -- NRO_DE_ORDEN [4]
-    Tipo_Orden               VARCHAR(50)   NULL,   -- TIPOORDEN [4]
-    Estado_Contratacion_OC   VARCHAR(20)   NULL,   -- ESTADOCONTRATACION [4]
+    Num_Contrato             VARCHAR(200)  NULL,   -- NUM_CONTRATO [3]
 
     -- ── Métricas financieras (soles) ──────────────────────────
     Cantidad_Adjudicada      DECIMAL(18,4) NOT NULL DEFAULT 0,
@@ -417,7 +413,6 @@ CREATE TABLE oro.Fact_Ordenes_Y_Contratos (
     Monto_Reduccion          DECIMAL(18,2) NOT NULL DEFAULT 0,  -- [3]
     Monto_Prorroga           DECIMAL(18,2) NOT NULL DEFAULT 0,  -- [3]
     Monto_Complementario     DECIMAL(18,2) NOT NULL DEFAULT 0,  -- [3]
-    Monto_Total_OC           DECIMAL(18,2) NOT NULL DEFAULT 0,  -- [4]
 
     -- ── Columnas calculadas PERSISTIDAS ───────────────────────
     -- DATEDIFF sobre DATE es determinístico: no lanza Msg 4936
@@ -460,12 +455,11 @@ CREATE TABLE oro.Fact_Ordenes_Y_Contratos (
     Flag_Fuera_Petitorio      BIT          NOT NULL DEFAULT 0,
         -- 1 cuando DESCRIPCION_ITEM contenía "FUERA DEL PETITORIO"
 
-    Estado_Item               VARCHAR(30)  NULL,   -- Adjudicado/Consentido/Contratado
     Moneda_Original           CHAR(3)      NOT NULL DEFAULT 'PEN',
 
     -- ── Auditoría ─────────────────────────────────────────────
     Fuente_Dataset            VARCHAR(25)  NOT NULL,
-        -- 'ADJUDICACION' / 'CONTRATACION_DIRECTA' / 'CONTRATO' / 'ORDEN_COMPRA'
+        -- 'ADJUDICACION' / 'CONTRATACION_DIRECTA'
     Anio_Fiscal               SMALLINT     NOT NULL,
     Fecha_Carga               DATETIME2    NOT NULL DEFAULT GETDATE(),
 
@@ -478,8 +472,6 @@ CREATE TABLE oro.Fact_Ordenes_Y_Contratos (
         FOREIGN KEY (FK_Tiempo_Buena_Pro)    REFERENCES oro.Dim_Tiempo (SK_Tiempo),
     CONSTRAINT FK_Fact_TSuscripcion
         FOREIGN KEY (FK_Tiempo_Suscripcion)  REFERENCES oro.Dim_Tiempo (SK_Tiempo),
-    CONSTRAINT FK_Fact_TEmisionOC
-        FOREIGN KEY (FK_Tiempo_Emision_OC)   REFERENCES oro.Dim_Tiempo (SK_Tiempo),
     CONSTRAINT FK_Fact_Entidad
         FOREIGN KEY (FK_Entidad)             REFERENCES oro.Dim_Entidad_Compradora (SK_Entidad),
     CONSTRAINT FK_Fact_Medicamento
@@ -542,7 +534,6 @@ SELECT
     COUNT(*)                                    AS Cantidad_Items,
     SUM(f.Monto_Adjudicado_Soles)               AS Monto_Adjudicado_Total,
     SUM(f.Monto_Adicional)                      AS Sobrecosto_Adendas,
-    SUM(f.Monto_Total_OC)                       AS Monto_Ejecutado_OC,
     AVG(CAST(f.Lead_Time_Total_Dias AS FLOAT))  AS Promedio_Lead_Time_Dias,
     MAX(f.Lead_Time_Total_Dias)                 AS Max_Lead_Time_Dias
 FROM       oro.Fact_Ordenes_Y_Contratos f
@@ -582,8 +573,7 @@ SELECT
     f.Monto_Adjudicado_Soles,
     f.Monto_Adicional,
     f.Ratio_Sobrecosto_Pct,
-    f.Flag_Tiene_Adenda,
-    f.Estado_Item
+    f.Flag_Tiene_Adenda
 FROM       oro.Fact_Ordenes_Y_Contratos f
 INNER JOIN oro.Dim_Tiempo               t   ON f.FK_Tiempo_Convocatoria = t.SK_Tiempo
 INNER JOIN oro.Dim_Entidad_Compradora   e   ON f.FK_Entidad              = e.SK_Entidad
@@ -763,13 +753,6 @@ GO
 SELECT 'FK_Fact_TSuscripcion' AS FK, COUNT(*) AS Orphans
 FROM oro.Fact_Ordenes_Y_Contratos f
 LEFT JOIN oro.Dim_Tiempo d ON f.FK_Tiempo_Suscripcion = d.SK_Tiempo
-WHERE d.SK_Tiempo IS NULL;
-GO
-
--- FK_Fact_TEmisionOC
-SELECT 'FK_Fact_TEmisionOC' AS FK, COUNT(*) AS Orphans
-FROM oro.Fact_Ordenes_Y_Contratos f
-LEFT JOIN oro.Dim_Tiempo d ON f.FK_Tiempo_Emision_OC = d.SK_Tiempo
 WHERE d.SK_Tiempo IS NULL;
 GO
 

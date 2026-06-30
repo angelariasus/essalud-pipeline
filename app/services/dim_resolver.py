@@ -278,6 +278,19 @@ def resolve_fact(
 ) -> DataFrame:
     """Resuelve todas las FK por join y arma la Fact. Descarta filas sin año fiscal."""
     f = flat_df.where(F.col("anio_fiscal").isNotNull())
+
+    # Columnas CONOSCE opcionales: presentes cuando la capa Silver ya fue enriquecida;
+    # ausentes cuando flat_df viene directo del flattener (p.ej. en tests unitarios).
+    _conosce_defaults = {
+        "num_contrato": F.lit(None).cast("string"),
+        "monto_reduccion": F.lit(0.0).cast("double"),
+        "monto_prorroga": F.lit(0.0).cast("double"),
+        "monto_complementario": F.lit(0.0).cast("double"),
+    }
+    for col_name, default_expr in _conosce_defaults.items():
+        if col_name not in f.columns:
+            f = f.withColumn(col_name, default_expr)
+
     f = f.withColumn("norm", _norm_udf(F.col("descripcion_item")))
 
     # Medicamento (norm -> FK), Proveedor (ruc -> SK).
@@ -313,23 +326,25 @@ def resolve_fact(
         _sk_tiempo("fecha_convocatoria").alias("FK_Tiempo_Convocatoria"),
         _sk_tiempo("fecha_buena_pro").alias("FK_Tiempo_Buena_Pro"),
         _sk_tiempo("fecha_suscripcion").alias("FK_Tiempo_Suscripcion"),
-        F.lit(SK_TIEMPO_NULO).alias("FK_Tiempo_Emision_OC"),
         "FK_Entidad", "FK_Medicamento", "FK_Proveedor", "FK_Tipo_Proceso", "FK_Ubigeo_Item",
         F.col("fecha_convocatoria").alias("Fecha_Convocatoria"),
         F.col("fecha_buena_pro").alias("Fecha_Buena_Pro"),
         F.col("fecha_suscripcion").alias("Fecha_Suscripcion"),
-        F.lit(None).cast("date").alias("Fecha_Emision_OC"),
-        F.lit(None).cast("int").alias("N_Item"),
+        F.col("n_item").cast("smallint").alias("N_Item"),
+        F.col("codigo_convocatoria").cast("bigint").alias("Codigo_Convocatoria"),
+        F.col("n_cod_contrato").cast("bigint").alias("N_Cod_Contrato"),
+        F.col("num_contrato").cast("string").alias("Num_Contrato"),
         F.coalesce(F.col("cantidad"), F.lit(0.0)).alias("Cantidad_Adjudicada"),
         F.coalesce(F.col("monto_referencial"), F.lit(0.0)).alias("Monto_Referencial_Soles"),
         F.coalesce(F.col("monto_adjudicado"), F.lit(0.0)).alias("Monto_Adjudicado_Soles"),
         F.coalesce(F.col("monto_contratado"), F.lit(0.0)).alias("Monto_Contratado_Item"),
         F.coalesce(F.col("monto_adicional"), F.lit(0.0)).alias("Monto_Adicional"),
-        F.lit(0.0).alias("Monto_Total_OC"),
+        F.coalesce(F.col("monto_reduccion"), F.lit(0.0)).alias("Monto_Reduccion"),
+        F.coalesce(F.col("monto_prorroga"), F.lit(0.0)).alias("Monto_Prorroga"),
+        F.coalesce(F.col("monto_complementario"), F.lit(0.0)).alias("Monto_Complementario"),
         F.col("es_contratacion_directa").cast("int").alias("Flag_Contratacion_Directa"),
         F.coalesce(F.col("norm").contains("FUERA DEL PETITORIO"), F.lit(False))
         .cast("int").alias("Flag_Fuera_Petitorio"),
-        F.substring(F.col("estado_adjudicacion"), 1, 30).alias("Estado_Item"),
         F.lit("PEN").alias("Moneda_Original"),
         F.when(F.col("es_contratacion_directa"), F.lit("CONTRATACION_DIRECTA"))
         .otherwise(F.lit("ADJUDICACION")).alias("Fuente_Dataset"),

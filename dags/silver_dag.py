@@ -1,9 +1,17 @@
+"""
+DAG de las capas Silver + Gold (transformación y carga del DW).
+
+Resuelve los años (de `dag_run.conf` o el default) y ejecuta el pipeline real:
+Silver (aplana Bronze -> staging_flat) y luego Gold (dimensiones -> destino).
+Imports de `app.*` diferidos dentro de los callables (Airflow parsea seguido).
+"""
 import sys
+from datetime import datetime, timedelta
+
 sys.path.append("/opt/airflow/bi")
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from datetime import datetime, timedelta
 
 default_args = {
     "owner": "data_engineer",
@@ -14,28 +22,50 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
+DEFAULT_YEARS = [2022, 2023, 2024, 2025]
+
 
 def _resolve_years(**context):
-    """Retorna [year] si se inyectó vía dag_run.conf, o None si es ejecución mensual."""
+    """Retorna los años desde dag_run.conf (year/years) o el default."""
     dag_run = context.get("dag_run")
-    if dag_run and dag_run.conf and "year" in dag_run.conf:
-        return [dag_run.conf["year"]]
-    return None
+    conf = (dag_run.conf if dag_run and dag_run.conf else {}) or {}
+    if conf.get("years"):
+        years = list(conf["years"])
+    elif conf.get("year"):
+        years = [conf["year"]]
+    else:
+        years = DEFAULT_YEARS
+    context["ti"].xcom_push(key="years", value=years)
+    return years
 
 
 def _run_silver(**context):
-    """Ejecuta SilverPipeline con los años resueltos desde XCom."""
-    import time
-    print("Simulando ejecución del Silver y Gold Pipeline...")
-    time.sleep(10)
-    print("Pipelines ejecutados con éxito.")
+    """Ejecuta SilverPipeline (Bronze -> staging_flat) para los años resueltos."""
+    from app.pipelines.silver_layer import SilverPipeline
+
+    years = context["ti"].xcom_pull(key="years", task_ids="resolve_years") or DEFAULT_YEARS
+    SilverPipeline().run_silver(years=years)
+
+
+def _run_gold(**context):
+    """Ejecuta GoldPipeline (staging_flat -> dimensiones -> destino)."""
+    from app.pipelines.gold_layer import GoldPipeline
+
+    dag_run = context.get("dag_run")
+    conf = (dag_run.conf if dag_run and dag_run.conf else {}) or {}
+    years = context["ti"].xcom_pull(key="years", task_ids="resolve_years") or DEFAULT_YEARS
+    GoldPipeline().run(
+        years=years,
+        target=conf.get("target", "parquet"),
+        profile=conf.get("profile", "local"),
+    )
 
 
 with DAG(
     "ocds_silver_pipeline",
     default_args=default_args,
     description=(
-        "Transforma datos Bronze en modelo dimensional y carga el Data Warehouse "
+        "Transforma datos Bronze en modelo dimensional y carga el destino Gold "
         "(Silver + Gold layers)."
     ),
     schedule_interval="@monthly",
@@ -54,4 +84,9 @@ with DAG(
         python_callable=_run_silver,
     )
 
-    resolve_years >> run_silver
+    run_gold = PythonOperator(
+        task_id="run_gold_pipeline",
+        python_callable=_run_gold,
+    )
+
+    resolve_years >> run_silver >> run_gold

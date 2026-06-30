@@ -24,6 +24,7 @@ pip-log.txt
 pip-delete-this-directory.txt
 
 # Virtual environments
+.venv/
 venv/
 env/
 ENV/
@@ -65,14 +66,18 @@ nosetests.xml
 coverage.xml
 
 # Data (keep data/ structure but ignore large files)
-data/audit/
 data/bronze/
+data/audit/
 data/silver/
+data/gold/
+# Power BI export (Parquet de las tablas oro.* del DW)
+bi/
 
 # AI assistant instruction files (local-only, not versioned)
 CLAUDE.md
 AGENTS.md
 GEMINI.md
+.claude/
 
 # Temporary files
 *.tmp

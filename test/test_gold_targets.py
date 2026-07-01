@@ -68,7 +68,7 @@ def test_sqlserver_target_delega_en_load_all(monkeypatch):
     from app.loaders.targets import sqlserver_target as st
     monkeypatch.setattr(dw_loader, "load_all", fake_load_all)
     # Mockear el export a bi/ (no conectar a SQL Server real en el unit test).
-    monkeypatch.setattr(st, "export_oro_to_bi", lambda *a, **k: captured.setdefault("bi", True))
+    monkeypatch.setattr(st, "export_dims_to_bi", lambda *a, **k: captured.setdefault("bi", True))
 
     dims = {"fact": MagicMock()}
     SqlServerTarget().load(dims)
@@ -92,7 +92,7 @@ def test_sqlserver_profile_docker_aplica_override(monkeypatch):
     import app.loaders.dw_loader as dw_loader
     monkeypatch.setattr(dw_loader, "load_all", fake_load_all)
     # Mockear el export a bi/ (no conectar a SQL Server real en el unit test).
-    monkeypatch.setattr(st, "export_oro_to_bi", lambda *a, **k: None)
+    monkeypatch.setattr(st, "export_dims_to_bi", lambda *a, **k: None)
 
     SqlServerTarget(profile="docker").load({"fact": MagicMock()})
     assert seen["conn_during"] == "DOCKER_CONN"          # override activo en la carga

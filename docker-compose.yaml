@@ -66,12 +66,32 @@ x-airflow-common:
     # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
     # yamllint enable rule:line-length
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # El default (1s) es demasiado agresivo en Docker Desktop/Windows: el primer
+    # envío a Celery (import de kombu.transport.redis en frío) puede excederlo y
+    # el SIGALRM deja el módulo `redis` a medio importar -> todos los envíos
+    # siguientes fallan con "module 'redis' has no attribute 'client'".
+    AIRFLOW__CELERY__OPERATION_TIMEOUT: '30'
     # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
     # for other purpose (development, test and especially production usage) build/extend Airflow image.
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
     # The following line can be used to set a custom config file, stored in the local config folder
     # If you want to use it, outcomment it and replace airflow.cfg with the name of your config file
     # AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
+    # ── EsSalud pipeline ──────────────────────────────────────────────
+    # El repo completo se monta en /opt/airflow/bi (incluye el .env de Windows).
+    # OCDS_ENV_FILE apunta settings.py al dotenv del contenedor (.env.docker),
+    # evitando que JAVA_HOME/HADOOP_HOME de Windows rompan Spark en Linux.
+    OCDS_ENV_FILE: /opt/airflow/bi/.env.docker
+    # Los workers Python de Spark NO heredan el sys.path del driver (el
+    # sys.path.append de los DAGs): sin esto, las UDFs que despickean `app.*`
+    # fallan con ModuleNotFoundError dentro del executor.
+    PYTHONPATH: /opt/airflow/bi
+    # SMTP de Airflow -> MailHog (notificaciones de fallo de DAGs, opcional).
+    AIRFLOW__SMTP__SMTP_HOST: mailhog
+    AIRFLOW__SMTP__SMTP_PORT: '1025'
+    AIRFLOW__SMTP__SMTP_STARTTLS: 'false'
+    AIRFLOW__SMTP__SMTP_SSL: 'false'
+    AIRFLOW__SMTP__SMTP_MAIL_FROM: alertas@essalud-pipeline.local
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -87,6 +107,52 @@ x-airflow-common:
       condition: service_healthy
 
 services:
+  # ── SQL Server del Data Warehouse (Gold --target sqlserver --profile docker) ──
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-EsSalud2024!}
+      MSSQL_PID: Developer
+    ports:
+      - "11433:1433"       # host: localhost,11433  ·  contenedores: sqlserver:1433
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$${MSSQL_SA_PASSWORD:-EsSalud2024!}" -C -Q "SELECT 1" || exit 1'
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: always
+
+  # One-shot: crea la BD del DW (la cadena pyodbc conecta directo a ella).
+  sqlserver-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-EsSalud2024!}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >
+        /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa
+        -P "$${MSSQL_SA_PASSWORD:-EsSalud2024!}" -C
+        -Q "IF DB_ID('DW_EsSalud_Adquisiciones') IS NULL
+        CREATE DATABASE DW_EsSalud_Adquisiciones COLLATE Modern_Spanish_CI_AI"
+    restart: "no"
+
+  # ── MailHog: SMTP local para la Fase 6 (captura correos sin credenciales) ──
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "8025:8025"        # UI web: http://localhost:8025
+      - "1025:1025"        # SMTP
+    restart: always
+
   postgres:
     image: postgres:13
     environment:
@@ -287,3 +353,4 @@ services:
 
 volumes:
   postgres-db-volume:
+  sqlserver-data:

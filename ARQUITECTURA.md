@@ -388,3 +388,40 @@ essalud-pipeline/
 ├── docker-compose.yaml # Stack completo (Airflow + Redis + PostgreSQL)
 └── .env                # Variables de entorno locales (no versionado)
 ```
+
+---
+
+## Capas aditivas (2026-07)
+
+Dos capas de consumo que **no modifican** el pipeline Bronze→Silver→Gold; ambas
+leen los Parquet de `bi/`:
+
+### Fase 4 — ML de Lead Time (`mlpredicts/`)
+
+XGBoost (objetivo en log1p) que predice los días entre convocatoria y suscripción
+por ítem. Entrena desde `bi/Fact...parquet` + dims y publica
+`bi/Pred_Lead_Time.parquet` (real vs. predicho + residual, clave `ID_Registro`).
+Detalle en `fase4-lead-time-predictivo.md`.
+
+### Fase 6 — Alertas operativas (`app/services/alerting.py`)
+
+Motor pandas (sin Spark) con dos fuentes de riesgo:
+
+- **HHI**: réplica de la vista `oro.vw_Matriz_Riesgo_HHI` sobre `bi/` — mercados
+  (año × entidad × medicamento) con HHI ≥ 8000, medicamento de uso restringido y
+  proveedor dominante ≥ 80 %.
+- **Lead Time anómalo**: residual de la Fase 4 > media + 2σ.
+
+Consolida `bi/Alertas.parquet` y envía correo formal (RUC dominante + medicamento
++ Red Asistencial) por SMTP. CLI: `python main.py alert`; en Airflow, el DAG
+`ocds_alerting` corre tras Gold (el correo cae en **MailHog** en el stack local).
+
+### Stack Docker ampliado
+
+`docker-compose.yaml` añade al stack de Airflow: **`sqlserver`** (DW en contenedor,
+puerto host 11433, BD creada por `sqlserver-init`) y **`mailhog`** (SMTP de pruebas,
+UI :8025). Tres ajustes críticos del entorno contenedor (ver CHANGELOG §10.6):
+`OCDS_ENV_FILE=.env.docker` (aísla el `.env` de Windows), `PYTHONPATH=/opt/airflow/bi`
+(los executors de Spark no heredan `sys.path`) y `AIRFLOW__CELERY__OPERATION_TIMEOUT=30`.
+
+**Runbook completo del equipo:** `docs/guia-ejecucion.md`.

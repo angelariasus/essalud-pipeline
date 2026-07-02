@@ -56,6 +56,19 @@ def test_write_staging_jdbc_requiere_conexion(monkeypatch):
         dw_loader.write_staging_jdbc(MagicMock(), "stg.Dim_Proveedor")
 
 
+def test_write_staging_jdbc_aborta_con_credenciales_vacias(monkeypatch):
+    # trusted_connection=yes deriva user/password vacíos: debe abortar temprano
+    # con un mensaje accionable, no fallar críptico en el executor de Spark.
+    monkeypatch.setattr(dw_loader.settings, "DW_JDBC_URL", "")
+    monkeypatch.setattr(
+        dw_loader.settings, "DW_CONN_STRING",
+        "mssql+pyodbc://localhost/DW_EsSalud_Adquisiciones"
+        "?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes",
+    )
+    with pytest.raises(ValueError, match="trusted_connection|OCDS_DW_JDBC_USER"):
+        dw_loader.write_staging_jdbc(MagicMock(), "stg.Dim_Proveedor")
+
+
 def test_call_load_procedure_ejecuta_exec():
     engine = MagicMock()
     conn = engine.begin.return_value.__enter__.return_value

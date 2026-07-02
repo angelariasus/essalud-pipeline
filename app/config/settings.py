@@ -3,8 +3,12 @@ from pathlib import Path
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
-# Cargar variables de entorno desde el archivo .env si existe
-load_dotenv()
+# Cargar variables de entorno desde el archivo .env si existe.
+# OCDS_ENV_FILE permite apuntar a un dotenv alternativo (p.ej. `.env.docker` en
+# el contenedor de Airflow): el repo completo se monta en /opt/airflow/bi, y sin
+# esto el `.env` de Windows (JAVA_HOME=C:\..., HADOOP_HOME=C:\hadoop) se cargaría
+# dentro del contenedor Linux y rompería Spark.
+load_dotenv(os.getenv("OCDS_ENV_FILE") or None)
 
 # Base del proyecto (sube 3 niveles: settings.py -> config/ -> app/ -> bi/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -75,5 +79,15 @@ class Settings:
     # Configuraciones de IA (Gemini API)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+    # Fase 6 — Alertas por correo (SMTP). Default pensado para Gmail App Password
+    # (smtp.gmail.com:587 + STARTTLS) o MailHog local (localhost:1025, sin TLS).
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER: str = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    SMTP_STARTTLS: bool = os.getenv("SMTP_STARTTLS", "True").lower() in ("true", "1", "yes")
+    SMTP_FROM: str = os.getenv("SMTP_FROM", "") or os.getenv("SMTP_USER", "")
+    SMTP_TO: str = os.getenv("SMTP_TO", "")
 
 settings = Settings()

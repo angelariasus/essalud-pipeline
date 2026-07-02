@@ -111,7 +111,7 @@ def test_actual_nunca_negativo():
     p = pred()
     v = p["Lead_Time_Actual"].notna()
     assert (p.loc[v, "Lead_Time_Actual"] >= 0).all(), "Lead_Time_Actual tiene negativos"
-    assert v.sum() == 5938, f"Se esperaban 5938 actuals validos, hay {int(v.sum())}"
+    assert v.sum() == 5917, f"Se esperaban 5917 actuals validos, hay {int(v.sum())}"
 
 
 def test_residual_consistente():

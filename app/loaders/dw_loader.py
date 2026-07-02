@@ -113,11 +113,22 @@ def _jdbc_write_options() -> Dict[str, str]:
 
 def write_staging_jdbc(df: DataFrame, table: str, num_partitions: int = 4) -> None:
     """Escribe un DataFrame a una tabla staging por JDBC (overwrite, en lotes)."""
-    url, _, _ = _jdbc_conn()
+    url, user, password = _jdbc_conn()
     if not url:
         raise ValueError(
             "Sin conexión al DW: define OCDS_DW_JDBC_URL u OCDS_DW_CONN_STRING en tu .env. "
             "Para la escritura Spark→DW define además OCDS_SPARK_JARS_PACKAGES (driver mssql-jdbc)."
+        )
+    if not user or not password:
+        # Caso típico: OCDS_DW_CONN_STRING con trusted_connection=yes (Windows Auth).
+        # El driver JDBC de Spark NO hereda la autenticación de Windows, así que
+        # derivar credenciales de esa cadena produce user/password vacíos y la
+        # escritura fallaría con un error de login críptico recién en el executor.
+        raise ValueError(
+            "Credenciales JDBC incompletas (user/password vacíos). Si OCDS_DW_CONN_STRING "
+            "usa trusted_connection=yes (Windows Auth), Spark/JDBC no puede heredarla: "
+            "define OCDS_DW_JDBC_URL, OCDS_DW_JDBC_USER y OCDS_DW_JDBC_PASSWORD en tu .env "
+            "con un login de SQL Server (SQL Auth)."
         )
     n = df.rdd.getNumPartitions()
     writer = df.coalesce(min(n, num_partitions)) if n > num_partitions else df

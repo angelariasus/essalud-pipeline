@@ -1,0 +1,5 @@
+# El build solo necesita requirements.txt (el repo se monta como volumen en
+# runtime). Whitelist: excluye todo lo demás para un build context mínimo
+# (sin .venv/, data/, bi/, .git/ — gigas que hacían el build lento y frágil).
+*
+!requirements.txt

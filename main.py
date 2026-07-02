@@ -8,6 +8,7 @@ Subcomandos:
   - gold            : staging_flat -> dimensiones/Fact -> destino (parquet|sqlserver).
   - run-all/pipeline: Bronze -> Silver -> Gold en secuencia.
   - synth           : datos sintéticos (2025 + monto_adicional 2022-2024).
+  - alert           : Fase 6 — alertas HHI/lead time por correo (bi/Alertas.parquet).
   - clean           : limpia artefactos de una capa (bronze|silver|gold).
 
 Cada subcomando instancia solo lo que necesita (dispatch por comando), de modo
@@ -109,6 +110,16 @@ def _handle_synth(args):
     )
 
 
+def _handle_alert(args):
+    from app.services.alerting import send_alerts
+
+    n = send_alerts(
+        source=args.source, to=args.to, dry_run=args.dry_run,
+        limit=args.limit, sigma=args.sigma,
+    )
+    logger.info(f"Alertas notificadas: {n} (source={args.source}).")
+
+
 def _handle_clean(args):
     from app.utils.cleaner import clean_layer
 
@@ -187,6 +198,20 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--no-enrich", action="store_true",
                        help="No enriquecer monto_adicional en 2022-2023")
         p.set_defaults(func=_handle_synth)
+
+    # -- alert (Fase 6) --
+    p = sub.add_parser("alert", help="Alertas de abastecimiento (HHI + lead time) por correo")
+    p.add_argument("--source", type=str, default="all",
+                   choices=["hhi", "leadtime", "all"], help="Fuente de alertas (default all)")
+    p.add_argument("--to", type=str, default=None,
+                   help="Destinatario (default SMTP_TO del .env)")
+    p.add_argument("--limit", type=int, default=20,
+                   help="Máximo de alertas detalladas en el correo (default 20)")
+    p.add_argument("--sigma", type=float, default=2.0,
+                   help="Umbral de anomalía de lead time en desviaciones (default 2.0)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Construye bi/Alertas.parquet e imprime el correo sin enviarlo")
+    p.set_defaults(func=_handle_alert)
 
     # -- clean --
     p = sub.add_parser("clean", help="Limpia artefactos de una capa")

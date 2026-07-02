@@ -15,6 +15,7 @@ Registro completo de todos los cambios realizados en el proyecto, desde la confi
 7. [Actualización 2026-05-28 — Granularidad nivel Red, idempotencia del DDL y recarga](#7-actualización-2026-05-28--granularidad-nivel-red-idempotencia-del-ddl-y-recarga)
 8. [Actualización 2026-05-28 — Migración a PySpark: Silver/Gold distribuido](#8-actualización-2026-05-28--migración-a-pyspark-silvergold-distribuido)
 9. [Actualización 2026-07-01 — Fase 4: Modelado Predictivo del Lead Time (ML)](#9-actualización-2026-07-01--fase-4-modelado-predictivo-del-lead-time-ml)
+10. [Actualización 2026-07-02 — Debug E2E + Fase 6: Alertas Operativas](#10-actualización-2026-07-02--debug-e2e--fase-6-alertas-operativas)
 
 ---
 
@@ -1108,3 +1109,86 @@ el modelo carga y **reproduce el 100 %** del parquet · sanidad por categoría (
 Gold/sintéticos, aguas arriba). No afecta al modelo de lead time (el monto pesa ~3 % en la
 importancia), pero conviene sanearlo en el paso `synth`/`gold` si Power BI usará montos. La
 **integración con Power BI queda documentada en el plan pero no se ejecuta** en esta fase.
+
+---
+
+## 10. Actualización 2026-07-02 — Debug E2E + Fase 6: Alertas Operativas
+
+Implementación del plan `debug-endtoend-fase6.md` (con la decisión del usuario:
+**Cloudflare = solo R2 opcional para Bronze; el DW se accede local o en
+contenedor Docker, sin túnel**). Incluye la **Fase 6**: alertas automáticas por
+correo con RUC del proveedor dominante, medicamento y Red Asistencial.
+
+### 10.1 ✨ Fase 6 — motor de alertas (`app/services/alerting.py`)
+
+- **Fuente HHI**: réplica pandas exacta de `oro.vw_Matriz_Riesgo_HHI` sobre
+  `bi/*.parquet` (HHI ≥ 8000, dominante ≥ 80%, mismos umbrales del semáforo).
+  `Es_Uso_Critico` se deriva de `Restriccion_Uso` del Petitorio (en el DW es
+  `BIT DEFAULT 0` sin poblar — la vista SQL nunca dispararía CRITICO).
+- **Fuente Lead Time** (Fase 4): procesos con `Residual > media + 2σ`
+  (`--sigma` configurable); resuelve RUC/medicamento vía `ID_Registro`
+  (posicional sobre la Fact).
+- **Salidas**: `bi/Alertas.parquet` (esquema de 10 columnas para la Vista
+  Operativa de Power BI) + correo formal SMTP (texto plano + tabla HTML).
+- **CLI**: `python main.py alert [--source hhi|leadtime|all] [--to] [--limit]
+  [--sigma] [--dry-run]`. SMTP en `.env` (Gmail App Password o MailHog local).
+- **Airflow**: nuevo DAG `ocds_alerting` (disparado por `ocds_silver_pipeline`
+  tras Gold); `silver_dag` ganó la tarea **`run_synth`** entre Silver y Gold
+  (antes faltaba y Gold quedaba casi vacío en 2024/2025).
+- **Guía institucional sin código**: `docs/fase6-powerautomate.md`
+  (Power BI Service + visual Power Automate + Send email V2).
+- **Tests**: `test/test_alerting.py` (17 pruebas: HHI monopolio/duopolio/
+  dominante, outliers de lead time, correo con los 3 campos, dry-run, CLI).
+
+### 10.2 🔧 Fixes del camino `--target sqlserver`
+
+| Problema | Fix |
+|---|---|
+| `_derive_jdbc_from_conn` derivaba user/password **vacíos** con `trusted_connection=yes` y la escritura Spark fallaba críptica en el executor | `write_staging_jdbc` ahora **aborta temprano** con mensaje accionable (definir `OCDS_DW_JDBC_URL/USER/PASSWORD` con SQL Auth) |
+| El `.env` de Windows montado en el contenedor pisaba `JAVA_HOME`/`HADOOP_HOME` y rompía Spark en Linux | `settings.py` soporta **`OCDS_ENV_FILE`**; el compose apunta a **`.env.docker`** (sin rutas Windows, `local[*]`, DW → `sqlserver:1433`) |
+| `--profile docker` era no-op silencioso (vars `*_DOCKER` vacías) | `.env` del host ahora define `OCDS_DW_*_DOCKER` → `localhost:11433` (puerto publicado del contenedor) |
+| `pyodbc` sin driver del SO en la imagen Airflow | `Dockerfile` instala **msodbcsql18 + unixodbc + mssql-tools18** (repo Microsoft Debian 12) |
+| No existía contenedor MSSQL en el compose | Servicios **`sqlserver`** (mcr 2022, `11433:1433`, healthcheck sqlcmd, volumen persistente) + **`sqlserver-init`** (crea `DW_EsSalud_Adquisiciones`) + **`mailhog`** (SMTP pruebas, UI `:8025`) |
+| Build context gigante (`.venv/`, `data/`, `bi/`) | **`.dockerignore`** whitelist (solo `requirements.txt`) |
+
+### 10.3 Archivos nuevos / modificados
+
+**Nuevos**: `app/services/alerting.py` · `dags/alerting_dag.py` ·
+`test/test_alerting.py` · `docs/fase6-powerautomate.md` · `.env.example` ·
+`.env.docker` · `.dockerignore`.
+**Modificados**: `main.py` (subcomando `alert`) · `dags/silver_dag.py`
+(`run_synth` + `trigger_alerting`) · `app/loaders/dw_loader.py` ·
+`app/config/settings.py` (OCDS_ENV_FILE + SMTP) · `docker-compose.yaml` ·
+`Dockerfile` · `.env` · `README.md`.
+
+### 10.4 Seguridad
+
+- Verificado: **`.env` nunca estuvo trackeado en git** (el hallazgo del plan
+  era obsoleto); `.gitignore` ya lo cubría. Se añade `.env.example` sin secretos.
+- `.env.docker` sí se versiona: solo contiene credenciales de desarrollo del
+  contenedor local (mismo default que el compose), sin secretos reales.
+
+### 10.5 ⚠️ Nota operativa — regeneración vía Airflow vs. host
+
+El DAG `ocds_silver_pipeline` regenera `staging_flat` y `bi/` **sobre el volumen
+montado**. El paso `synth` es determinista respecto a la semilla (42) pero
+**sensible al layout de particiones de Spark** (`orderBy(rand(seed)).limit(n)`):
+el contenedor (`local[*]`) muestrea un subconjunto distinto al del host
+(`local[4]`) — el total se mantiene en 9 292, pero los actuals válidos de lead
+time cambian (host: 5 917; contenedor: 6 303). Si se regenera desde el DAG, hay
+que **re-ejecutar el notebook de la Fase 4** (`mlpredicts/LeadTime_Predictor.ipynb`)
+para realinear `Pred_Lead_Time.parquet`/`best_model.joblib` y ajustar el conteo
+esperado en `test_pred_lead_time.py`. El flujo canónico documentado sigue siendo
+el del **host Windows** (silver → synth → gold → notebook → test 10/10).
+
+### 10.6 Fixes de orquestación encontrados en la verificación E2E (Capa 9)
+
+| Síntoma | Causa raíz | Fix |
+|---|---|---|
+| Todo DAG fallaba con "task killed externally"; el worker nunca recibía tareas; scheduler: `module 'redis' has no attribute 'client'` | `AIRFLOW__CELERY__OPERATION_TIMEOUT` default (1 s) expiraba durante el primer import en frío de `kombu.transport.redis`; el SIGALRM dejaba el módulo `redis` a medio importar en `sys.modules` (envenenado para todos los envíos siguientes) | `AIRFLOW__CELERY__OPERATION_TIMEOUT: '30'` en el compose |
+| Silver fallaba en el executor: `ModuleNotFoundError: No module named 'app'` (las UDFs no despickean) | Los workers Python de Spark no heredan el `sys.path` del driver (el `sys.path.append` del DAG solo afecta al driver) | `PYTHONPATH: /opt/airflow/bi` en el entorno común del compose |
+| Silver fallaba: `UNSUPPORTED_PACKAGE_VERSION: Pandas >= 2.2.0 must be installed; your version is 2.1.4` | La imagen de Airflow 2.9.1 fija pandas 2.1.4; PySpark 4.x exige ≥ 2.2 | `pandas>=2.2,<2.3` explícito en el `pip install` del Dockerfile |
+
+Con los tres fixes, la cadena completa `ocds_silver_pipeline` (resolve → silver
+→ synth → gold → trigger) y `ocds_alerting` terminan en **success**, con el
+correo de alertas capturado en MailHog.

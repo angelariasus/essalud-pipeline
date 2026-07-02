@@ -2,7 +2,9 @@
 DAG de las capas Silver + Gold (transformación y carga del DW).
 
 Resuelve los años (de `dag_run.conf` o el default) y ejecuta el pipeline real:
-Silver (aplana Bronze -> staging_flat) y luego Gold (dimensiones -> destino).
+Silver (aplana Bronze -> staging_flat), Synth (sintéticos 2024/2025 + adendas,
+paso obligatorio antes de Gold: sin él 2024/2025 quedan casi vacíos) y Gold
+(dimensiones -> destino). Al terminar dispara `ocds_alerting` (Fase 6).
 Imports de `app.*` diferidos dentro de los callables (Airflow parsea seguido).
 """
 import sys
@@ -12,6 +14,7 @@ sys.path.append("/opt/airflow/bi")
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 default_args = {
     "owner": "data_engineer",
@@ -45,6 +48,18 @@ def _run_silver(**context):
 
     years = context["ti"].xcom_pull(key="years", task_ids="resolve_years") or DEFAULT_YEARS
     SilverPipeline().run_silver(years=years)
+
+
+def _run_synth(**context):
+    """Genera los sintéticos (2025 CSV + boost 2024 + adendas) sobre staging_flat."""
+    from app.services.synthetic_generator import run_synthetic
+
+    dag_run = context.get("dag_run")
+    conf = (dag_run.conf if dag_run and dag_run.conf else {}) or {}
+    if conf.get("skip_synth"):
+        print("skip_synth=true en dag_run.conf; se omite la generación sintética.")
+        return
+    run_synthetic(adicional_p=conf.get("adicional_rate"))
 
 
 def _run_gold(**context):
@@ -84,9 +99,19 @@ with DAG(
         python_callable=_run_silver,
     )
 
+    run_synth = PythonOperator(
+        task_id="run_synth",
+        python_callable=_run_synth,
+    )
+
     run_gold = PythonOperator(
         task_id="run_gold_pipeline",
         python_callable=_run_gold,
     )
 
-    resolve_years >> run_silver >> run_gold
+    trigger_alerting = TriggerDagRunOperator(
+        task_id="trigger_alerting",
+        trigger_dag_id="ocds_alerting",
+    )
+
+    resolve_years >> run_silver >> run_synth >> run_gold >> trigger_alerting

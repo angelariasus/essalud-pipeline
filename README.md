@@ -13,6 +13,13 @@ Bronze  ──►  Silver  ──►  Gold
 - **Silver**: aplanado del JSON anidado, fuzzy matching y construcción de dimensiones (**Apache Spark / PySpark**).
 - **Gold**: carga atómica a un **modelo estrella** en SQL Server vía staging tables + stored procedure.
 
+> [!IMPORTANT]
+> **Novedades 2026-07-02** (ver [CHANGELOG §10](CHANGELOG.md)):
+> - **Fase 6 — Alertas operativas**: `python main.py alert` consolida riesgos (HHI crítico + Lead Time anómalo) en `bi/Alertas.parquet` y envía correo formal (RUC + medicamento + Red) — ver [§10](#10-modelado-predictivo-del-lead-time-fase-4--ml).
+> - **Stack Docker completo**: `docker compose up -d` levanta Airflow **+ SQL Server (DW) + MailHog (SMTP de pruebas)**; el DAG `ocds_silver_pipeline` ahora corre Silver → **Synth** → Gold → alertas de punta a punta.
+> - **Cloudflare** queda **solo como réplica opcional del Bronze (R2)**; el DW se trabaja **local o en contenedor** (`--profile local|docker`).
+> - **Guía de ejecución paso a paso para el equipo**: [`docs/guia-ejecucion.md`](docs/guia-ejecucion.md) ← *empieza aquí si acabas de hacer pull*.
+
 ---
 
 ## Tabla de contenidos
@@ -102,28 +109,40 @@ essalud-pipeline/
 │   │   ├── conosce_enricher.py     # Enriquecimiento con Excel CONOSCE (SEACE)
 │   │   ├── dim_resolver.py         # Dimensiones + Fact (fuzzy match, SKs)
 │   │   ├── static_dims.py          # Dim_Tiempo y Dim_Ubigeo como DataFrames Spark + export bi/
-│   │   └── synthetic_generator.py  # Datos sintéticos (2024 boost + 2025 CSV)
+│   │   ├── synthetic_generator.py  # Datos sintéticos (2024 boost + 2025 CSV)
+│   │   └── alerting.py             # ★ Fase 6: alertas HHI + lead time → bi/Alertas.parquet + correo SMTP
 │   ├── storage/            # FileManager (disco) + R2Manager (Cloudflare R2)
 │   └── utils/
 │       ├── fuzzy_matcher.py    # Pandas UDFs RapidFuzz (medicamentos + redes)
 │       └── cleaner.py          # Limpieza por capa (bronze/silver/gold)
-├── dags/               # ocds_dag.py (targeted + bulk) · silver_dag.py (silver)
+├── dags/
+│   ├── ocds_dag.py         # DAGs targeted (semanal) + bulk (mensual)
+│   ├── silver_dag.py       # Silver → ★Synth → Gold → ★trigger ocds_alerting
+│   └── alerting_dag.py     # ★ Fase 6: DAG ocds_alerting (correo tras Gold)
+├── docs/
+│   ├── guia-ejecucion.md       # ★ Runbook del equipo: terminal, Docker, Airflow, SQL Server
+│   └── fase6-powerautomate.md  # ★ Guía institucional Power BI Service + Power Automate
 ├── star-schema/        # DDL del modelo estrella + DDL staging y stored procedure
 ├── extra-data/
 │   ├── Contratos/          # xlsx CONOSCE por año (2022–2025, ~63 000 filas)
 │   ├── CONOSCE_2025_essalud.csv  # Resumen EsSalud 2025 bienes (fuente synth)
 │   └── gemini_cache.json   # Caché local de respuestas Gemini
-├── test/               # Suite pytest (incluye tests de integración Spark)
+├── test/               # Suite pytest (incluye tests de integración Spark + ★test_alerting.py)
 ├── mlpredicts/         # Fase 4 — modelo predictivo de Lead Time (notebook + modelo joblib + tests)
 ├── ml/                 # requirements.txt del entorno ML de la Fase 4 (xgboost, sklearn, jupyter)
-├── bi/                 # Tablas Gold en Parquet para BI (7 tablas + Pred_Lead_Time.parquet)
-├── data/               # Data Lake local (bronze/ · silver/ · audit/) — ignorado por git
-├── Dockerfile          # Imagen Airflow extendida con Java 17 (JRE) para PySpark
-├── docker-compose.yaml # Stack Airflow: Postgres, Redis, Webserver, Scheduler, Worker
-├── main.py             # CLI Medallion (todos los subcomandos)
+├── bi/                 # Tablas Gold Parquet para BI (7 tablas + Pred_Lead_Time + ★Alertas.parquet)
+├── data/               # Data Lake local (bronze/ · silver/ · gold/ · audit/) — ignorado por git
+├── Dockerfile          # Imagen Airflow: Java 17 (JRE) + ★driver ODBC msodbcsql18 + ★pandas>=2.2
+├── docker-compose.yaml # Stack: Airflow (Postgres/Redis/…) + ★SQL Server DW + ★MailHog
+├── .env.example        # ★ Plantilla de variables (copiar a .env)
+├── .env.docker         # ★ Dotenv del contenedor (sin rutas Windows; lo carga OCDS_ENV_FILE)
+├── .dockerignore       # ★ Build context mínimo (solo requirements.txt)
+├── main.py             # CLI Medallion (todos los subcomandos, incluye ★alert)
 ├── pytest.ini          # Config pytest (pythonpath = .)
 └── requirements.txt    # Dependencias runtime (requests, boto3, pyspark, rapidfuzz, pyodbc…)
 ```
+
+> ★ = nuevo o modificado en la actualización 2026-07-02 (CHANGELOG §10).
 
 > **Nota:** la carpeta `data/` y los archivos de instrucciones de IA (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) están en `.gitignore` — ver [§13](#13-notas-de-versionado).
 
@@ -143,20 +162,26 @@ essalud-pipeline/
 
 ```powershell
 # 1. Crear y activar entorno virtual
-python -m venv venv
-.\venv\Scripts\activate
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 
 # 2. Instalar dependencias de runtime
 pip install -r requirements.txt
 
-# 3. (Opcional) Dependencias de desarrollo: tests, lint y Airflow
+# 3. (Opcional) Dependencias de desarrollo: tests y lint
 pip install -r requirements-dev.txt
 
-# 4. Configurar credenciales y conexiones en el archivo .env de la raíz
-#    (ver la sección de Variables de entorno)
+# 4. Crear tu .env desde la plantilla y editarlo
+Copy-Item .env.example .env
+#    (ver la sección de Variables de entorno; los defaults funcionan con el
+#     stack Docker local sin tocar nada más que JAVA_HOME/HADOOP_HOME)
 ```
 
-> El archivo `.env` está en la raíz del proyecto y **no se versiona** (está en `.gitignore`). Edítalo con tus credenciales de R2 y la cadena de conexión al Data Warehouse.
+> El archivo `.env` está en la raíz y **no se versiona** (`.gitignore`); la plantilla
+> versionada es **`.env.example`**. El contenedor de Airflow usa su propio dotenv
+> (**`.env.docker`**, sin rutas Windows) seleccionado vía `OCDS_ENV_FILE`.
+>
+> **Guía completa de ejecución para el equipo:** [`docs/guia-ejecucion.md`](docs/guia-ejecucion.md).
 
 ---
 
@@ -176,7 +201,12 @@ Configuradas en `.env` (raíz del proyecto):
 | `OCDS_SPARK_MASTER` | Master de Spark (default `local[4]`; `local[*]`/cluster en Linux) |
 | `OCDS_SPARK_JARS_PACKAGES` / `OCDS_SPARK_JARS` | Driver mssql-jdbc (coordenadas Maven / jars locales) |
 | `OCDS_DW_CONN_STRING` | Conexión SQLAlchemy/pyodbc para DDL + stored procedure |
-| `OCDS_DW_JDBC_URL` / `USER` / `PASSWORD` / `BATCHSIZE` | Conexión JDBC para los writes de Spark (se deriva de `OCDS_DW_CONN_STRING` si no se define) |
+| `OCDS_DW_JDBC_URL` / `USER` / `PASSWORD` / `BATCHSIZE` | Conexión JDBC para los writes de Spark. **Con `trusted_connection=yes` (Windows Auth) son OBLIGATORIAS**: Spark/JDBC no hereda la autenticación de Windows y el pipeline aborta temprano si faltan |
+| `OCDS_DW_*_DOCKER` (`CONN_STRING` / `JDBC_URL` / `JDBC_USER` / `JDBC_PASSWORD`) | ★ Cadenas del perfil `--profile docker`: apuntan al contenedor `sqlserver` (host: `localhost:11433`) |
+| `MSSQL_SA_PASSWORD` | ★ Password `sa` del SQL Server en contenedor (default `EsSalud2024!`, solo dev local) |
+| `SMTP_HOST` / `PORT` / `USER` / `PASSWORD` / `STARTTLS` / `FROM` / `TO` | ★ Fase 6 — envío del correo de alertas. Default: MailHog local (`localhost:1025`, sin TLS). Para Gmail: `smtp.gmail.com:587` + App Password |
+| `OCDS_ENV_FILE` | ★ Dotenv alternativo (el compose lo fija a `.env.docker` dentro del contenedor para no cargar rutas Windows) |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | Limpieza IA en Silver (vacío = no-op con degradación del fuzzy match) |
 
 ---
 
@@ -251,12 +281,23 @@ python main.py synth                               # defaults: 2025=2176, 2024=2
 python main.py synth --adicional-rate 0.2          # más adendas para señal ML
 python main.py gold  --target sqlserver            # carga los ~9 292 registros totales
 
+# ── Fase 6: alertas de abastecimiento (tras gold) ────────────────
+python main.py alert --dry-run                     # bi/Alertas.parquet + preview del correo
+python main.py alert                               # envío real (SMTP del .env)
+python main.py alert --source hhi --to correo@x.y  # solo HHI, destinatario puntual
+
 # ── Reconstrucción / limpieza ────────────────────────────────────
 python main.py silver --rebuild                    # limpia staging y reprocesa
 python main.py gold   --rebuild --target sqlserver # re-DDL idempotente + carga
 python main.py clean  silver                       # borra solo data/silver/staging_flat
 python main.py clean  bronze --yes                 # borra Bronze (requiere --yes)
 ```
+
+> ⚠️ **Orden canónico**: `silver → synth → gold` (→ `alert`). Saltarse `synth`
+> deja 2024/2025 casi vacíos y rompe el contrato de 9 292 filas que asume el ML.
+> Regenerar los datos **siempre desde el host Windows**: el `synth` del contenedor
+> muestrea un subconjunto distinto (mismo total, otros ítems) y desalinea
+> `Pred_Lead_Time.parquet` — ver CHANGELOG §10.5.
 
 Lo que ejecuta cada capa:
 
@@ -381,6 +422,33 @@ $env:PYTHONUTF8 = 1; .venv\Scripts\python.exe mlpredicts\test_pred_lead_time.py
 El plan completo y la guía de integración con Power BI están en
 [`fase4-lead-time-predictivo.md`](fase4-lead-time-predictivo.md).
 
+### Fase 6 — Alertas operativas de abastecimiento
+
+Capa de respuesta operativa que consolida dos fuentes de riesgo en
+**`bi/Alertas.parquet`** y notifica por **correo formal** (RUC del proveedor
+dominante + medicamento + Red Asistencial) al área de abastecimiento:
+
+- **HHI crítico** (réplica pandas de `oro.vw_Matriz_Riesgo_HHI`): mercados con
+  HHI ≥ 8000, medicamento de uso restringido y proveedor dominante ≥ 80%.
+- **Lead Time anómalo** (Fase 4): procesos cuyo residual (real − predicho)
+  excede `media + 2σ`.
+
+```powershell
+# Vista previa sin enviar (genera bi/Alertas.parquet e imprime el correo)
+python main.py alert --dry-run
+
+# Envío real (SMTP del .env: MailHog local o Gmail App Password)
+python main.py alert --to fernando.barrera@unmsm.edu.pe
+python main.py alert --source hhi --limit 30   # solo HHI, hasta 30 filas en el correo
+```
+
+SMTP se configura en `.env` (`SMTP_HOST/PORT/USER/PASSWORD/STARTTLS/FROM/TO`).
+Para pruebas sin credenciales, el stack Docker incluye **MailHog**
+(`docker compose up -d mailhog`, UI en <http://localhost:8025>). En Airflow, el
+DAG **`ocds_alerting`** corre automáticamente tras Gold. La variante
+institucional sin código (Power BI Service + Power Automate) está documentada en
+[`docs/fase6-powerautomate.md`](docs/fase6-powerautomate.md).
+
 ---
 
 ## 11. Orquestación con Apache Airflow
@@ -403,7 +471,45 @@ docker compose up -d --build
 |---|---|---|
 | `ocds_targeted_ingestion` | semanal | Ingesta Targeted del año en curso (límite 100 en dev); dispara el Silver al terminar |
 | `ocds_bulk_ingestion` | mensual | Descarga bulk mensual del SEACE |
-| `ocds_silver_pipeline` | mensual | Transforma Bronze → Silver/Gold (Spark en modo local dentro del worker); acepta `year` vía `dag_run.conf` |
+| `ocds_silver_pipeline` | mensual | Bronze → Silver → **Synth** → Gold (Spark local dentro del worker); acepta `years`/`target`/`profile`/`skip_synth` vía `dag_run.conf`; al terminar dispara `ocds_alerting` |
+| `ocds_alerting` | on-trigger | Fase 6: consolida `bi/Alertas.parquet` y envía el correo de alertas (SMTP → MailHog en el stack) |
+
+**Servicios del stack** (además de los propios de Airflow):
+
+| Servicio | Puerto host | Función |
+|---|---|---|
+| `sqlserver` | `11433` → 1433 | SQL Server 2022 (DW en contenedor, volumen persistente) |
+| `sqlserver-init` | — | One-shot: crea la BD `DW_EsSalud_Adquisiciones` |
+| `mailhog` | UI `8025` · SMTP `1025` | Captura los correos de la Fase 6 sin credenciales |
+
+**Comandos de operación y revisión:**
+
+```powershell
+# Estado de los servicios (todos deben quedar healthy)
+docker compose ps
+
+# Disparar el pipeline completo y las alertas manualmente
+docker exec essalud-pipeline-airflow-scheduler-1 airflow dags trigger ocds_silver_pipeline
+docker exec essalud-pipeline-airflow-scheduler-1 airflow dags trigger ocds_alerting
+
+# Revisar corridas y errores de import de DAGs
+docker exec essalud-pipeline-airflow-scheduler-1 airflow dags list-runs -d ocds_silver_pipeline
+docker exec essalud-pipeline-airflow-scheduler-1 airflow dags list-import-errors
+
+# Log de una tarea (la ruta se arma con dag_id/run_id/task_id)
+docker exec essalud-pipeline-airflow-worker-1 bash -c "ls /opt/airflow/logs/dag_id=ocds_silver_pipeline/"
+```
+
+**Detalles de entorno del contenedor** (configurados en `docker-compose.yaml`, no tocar sin motivo):
+
+- `OCDS_ENV_FILE=/opt/airflow/bi/.env.docker` — dentro del contenedor `settings.py`
+  carga `.env.docker` en lugar del `.env` de Windows (cuyo `JAVA_HOME`/`HADOOP_HOME`
+  con rutas `C:\` romperían Spark en Linux).
+- `PYTHONPATH=/opt/airflow/bi` — los workers Python de Spark no heredan el
+  `sys.path` del driver; sin esto las UDFs fallan con `No module named 'app'`.
+- `AIRFLOW__CELERY__OPERATION_TIMEOUT=30` — el default (1 s) corta el primer
+  envío a Celery en frío y deja el módulo `redis` corrupto (todo DAG fallaría
+  con *"task killed externally"*).
 
 ---
 
@@ -435,8 +541,15 @@ data/
 │   └── bulk_files/     # ZIPs crudos y catálogos descomprimidos
 ├── silver/
 │   └── staging_flat/   # Salida Spark aplanada, Parquet particionado por anio_fiscal
+├── gold/               # Modelo estrella materializado en Parquet (target default)
 └── audit/
     └── executions/     # ocds_extraction.log (nivel debug)
+
+bi/                     # (raíz del repo, gitignored) Parquet para Power BI:
+├── Dim_*.parquet            # 6 dimensiones
+├── Fact_Ordenes_Y_Contratos.parquet  # 9 292 filas
+├── Pred_Lead_Time.parquet    # Fase 4 (lo genera el notebook de mlpredicts/)
+└── Alertas.parquet           # Fase 6 (lo genera `python main.py alert`)
 ```
 
 Todo el contenido de `data/` se **genera automáticamente** al ejecutar el pipeline (las rutas se crean solas), por lo que no se versiona.
@@ -447,8 +560,9 @@ Todo el contenido de `data/` se **genera automáticamente** al ejecutar el pipel
 
 Para mantener el repositorio limpio, los siguientes elementos están en `.gitignore` y **no se suben** al remoto:
 
-- **`data/`** completo (`bronze/`, `silver/`, `audit/`) — artefactos generados y regenerables por el pipeline.
+- **`data/`** completo (`bronze/`, `silver/`, `gold/`, `audit/`) y **`bi/`** — artefactos generados y regenerables por el pipeline (ver [`docs/guia-ejecucion.md`](docs/guia-ejecucion.md) §2 para regenerarlos tras el pull).
+- **Notebooks** (`*.ipynb`), incluido `mlpredicts/LeadTime_Predictor.ipynb` — el modelo serializado y los tests sí se versionan.
 - **Archivos de instrucciones de IA:** `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` — son locales; cada quien los edita sin afectar el repo.
 - **`.env`** y credenciales.
 
-Archivos de documentación que **sí** se versionan: `README.md`, `CHANGELOG.md` (historial detallado de cambios) y `fase4-lead-time-predictivo.md` (plan de la Fase 4 de ML + guía de Power BI).
+Archivos de configuración/documentación que **sí** se versionan: `README.md`, `CHANGELOG.md` (historial detallado), `fase4-lead-time-predictivo.md`, **`docs/guia-ejecucion.md`** (runbook del equipo), **`docs/fase6-powerautomate.md`**, **`.env.example`** (plantilla sin secretos) y **`.env.docker`** (dotenv del contenedor, solo credenciales dev del stack local).

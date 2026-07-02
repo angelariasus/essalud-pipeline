@@ -14,6 +14,7 @@ Registro completo de todos los cambios realizados en el proyecto, desde la confi
 6. [Cómo ejecutar el pipeline completo](#6-cómo-ejecutar-el-pipeline-completo)
 7. [Actualización 2026-05-28 — Granularidad nivel Red, idempotencia del DDL y recarga](#7-actualización-2026-05-28--granularidad-nivel-red-idempotencia-del-ddl-y-recarga)
 8. [Actualización 2026-05-28 — Migración a PySpark: Silver/Gold distribuido](#8-actualización-2026-05-28--migración-a-pyspark-silvergold-distribuido)
+9. [Actualización 2026-07-01 — Fase 4: Modelado Predictivo del Lead Time (ML)](#9-actualización-2026-07-01--fase-4-modelado-predictivo-del-lead-time-ml)
 
 ---
 
@@ -988,3 +989,122 @@ Los Parquet planos individuales `ocds_flat_<year>.parquet` fueron reemplazados p
 2. **Carga atómica**: staging tables + `usp_Load_From_Staging` en transacción única; si Spark falla, producción intacta; si el procedure falla, ROLLBACK.
 3. **SKs deterministas**: las dimensiones no dependen de `IDENTITY` de SQL Server; Spark calcula SKs por hash/regla, permitiendo `SET IDENTITY_INSERT` y recargas idempotentes.
 4. **Graceful degradation**: ante un error en el fuzzy matching de una fila, se asigna sentinel en lugar de abortar todo el Job.`
+
+---
+
+## 9. Actualización 2026-07-01 — Fase 4: Modelado Predictivo del Lead Time (ML)
+
+Se agrega una capa de **modelado predictivo** que estima cuántos días tarda un proceso
+de contratación entre la **convocatoria** y la **suscripción del contrato** (`Lead_Time_Total`),
+y publica las predicciones en una nueva tabla Gold para Power BI. **No modifica ningún
+archivo del pipeline existente** (Bronze→Silver→Gold): consume las tablas Parquet de `bi/`.
+
+### 9.1 Resumen
+
+- **Modelo:** XGBoost vs. Random Forest, seleccionado por RMSE con validación cruzada
+  estratificada de 5 folds por Red Asistencial. **Ganó XGBoost.**
+- **Entregable:** `bi/Pred_Lead_Time.parquet` (9 292 filas) — histórico real + predicho,
+  listo para la Vista Táctica de Power BI.
+- **Calidad:** MAE 15.8 días · mediana del error 3.6 días · **R² ≈ 0.85** · 10/10 pruebas OK.
+
+### 9.2 ✨ Nueva funcionalidad
+
+- **Predictor de Lead Time contractual** (`mlpredicts/LeadTime_Predictor.ipynb`, 13 celdas):
+  carga y une las 4 tablas relevantes de `bi/`, hace ingeniería de features, EDA (3 gráficos),
+  compara dos modelos por CV y exporta predicciones para **todos** los registros — incluidos
+  los procesos 2024-2025 aún en curso (sin fecha de suscripción), que es el caso de uso.
+- **Nueva tabla Gold `bi/Pred_Lead_Time.parquet`** con lead time real, predicho y residual
+  por proceso, para graficar histórico vs. predicho por año, Red y categoría.
+- **Modelo serializado reutilizable** (`mlpredicts/models/best_model.joblib`) cargable con
+  `joblib.load` para predecir sobre nuevos procesos.
+
+### 9.3 🔧 Correcciones de calidad de datos
+
+| Problema detectado | Corrección |
+|---|---|
+| `Lead_Time_Actual` mostraba **valores negativos** (p. ej. −29 d, residual −95.6) porque había fechas inconsistentes (suscripción antes que convocatoria) | Se anulan a `NaN` los Lead Times negativos (**651** en Total, **517** en Comité). Así `Lead_Time_Actual` nunca es negativo y `Residual` solo se calcula donde hay medición real válida |
+| Procesos **COMPETITIVO predichos en 0 días** (65-72 filas) por `clip(0)` sobre extrapolaciones negativas del modelo | Se modela el objetivo en escala **log1p** (`TransformedTargetRegressor`): predicciones siempre ≥ 0 y ninguna competitiva en ~0 días (mínimo 4.9 d). Mejora además la calibración de la mediana |
+| `N_Item` ~95 % nulo y `Codigo_Convocatoria` ~23 % nulo en el origen → filas sin clave estable | Se agrega **`ID_Registro`** (clave estable por fila) para trazabilidad y relaciones en Power BI |
+| Predicciones distintas entre máquinas (host vs. worker Docker) | XGBoost fijado a `n_jobs=1` → **resultado reproducible** entre entornos |
+| Texto del notebook con mojibake (`�`) | Notebook regenerado en **UTF-8 limpio** |
+
+### 9.4 Modelo y features
+
+- **Features (11):** 5 categóricas (`Red_Asistencial`, `Categoria_Proceso`, `Especialidad_Autorizada`,
+  `Tipo_Red`, `Metodo_Clasificacion`), 4 numéricas (`Monto_Adjudicado_Soles`, `Anio_Fiscal`,
+  `Mes_Convocatoria`, `retraso_historico_red`) y 2 binarias (`Flag_Contratacion_Directa`,
+  `Flag_Tiene_Adenda`).
+- **Ajustes al esquema real de la Fact:** `Flag_Tiene_Adenda` se **deriva** de `Monto_Adicional > 0`
+  (la Fact no trae el flag); `retraso_historico_red` (media de lead time de comité por Red) se
+  **imputa con la media global** cuando una Red no tiene historial.
+- **Preprocesamiento:** `OrdinalEncoder` (categóricas) + `StandardScaler` (numéricas) +
+  passthrough (binarias) en un `ColumnTransformer`, todo dentro de un `Pipeline`.
+- **Selección por RMSE (CV 5-fold estratificado por Red):**
+
+| Modelo | CV RMSE (días) |
+|---|---|
+| **XGBoost (log1p)** ✅ | **55.29 ± 3.61** |
+| Random Forest (log1p) | 63.86 ± 3.13 |
+
+- **Feature dominante:** `Flag_Contratacion_Directa` (~0.6 de importancia) — la contratación
+  directa es el mayor predictor de rapidez.
+- **Calibración por año:** MAE 2024 = 11.6 d, MAE 2025 = 2.3 d (2025 es mayormente contratación
+  directa, con lead time real ≈ 0, correctamente predicho ≈ 0).
+
+### 9.5 Archivos nuevos
+
+| Archivo | Descripción |
+|---|---|
+| `mlpredicts/LeadTime_Predictor.ipynb` | Notebook del modelo predictivo (13 celdas, UTF-8) |
+| `mlpredicts/models/best_model.joblib` | Modelo XGBoost (log1p) serializado |
+| `mlpredicts/test_pred_lead_time.py` | 10 pruebas de verificación del entregable |
+| `bi/Pred_Lead_Time.parquet` | Tabla Gold de predicciones (9 292 filas) |
+| `fase4-lead-time-predictivo.md` | Plan de la fase (incluye guía de integración Power BI) |
+
+### 9.6 Esquema de `bi/Pred_Lead_Time.parquet`
+
+| Columna | Tipo | Notas |
+|---|---|---|
+| `ID_Registro` | int | Clave estable por fila (0…N-1) |
+| `Codigo_Convocatoria` | float | Clave natural SEACE (puede ser nula) |
+| `N_Item` | float | Número de ítem (escaso en el origen) |
+| `Anio_Fiscal` | int | 2022–2025 |
+| `Red_Asistencial` | str | Red (o `DESCONOCIDO`) |
+| `Categoria_Proceso` | str | COMPETITIVO / DIRECTO / CATALOGO / REGIMEN_ESPECIAL |
+| `Lead_Time_Actual` | float | Días reales; `NaN` si falta una fecha o son inconsistentes |
+| `Lead_Time_Predicho` | float | Predicción del modelo (siempre presente, ≥ 0) |
+| `Residual` | float | Actual − Predicho (`NaN` si Actual es `NaN`) |
+
+### 9.7 🐛 Pruebas y verificación
+
+Suite `mlpredicts/test_pred_lead_time.py` (**10/10 OK**), ejecutable de forma aislada
+sin Spark ni el `conftest` del proyecto:
+
+```bash
+PYTHONUTF8=1 .venv/Scripts/python.exe mlpredicts/test_pred_lead_time.py
+```
+
+Valida: existencia de entregables · 9 292 filas y esquema · `Lead_Time_Predicho` sin nulos y ≥ 0 ·
+**0 actuals negativos** · `Residual` consistente y solo donde hay Actual · `ID_Registro` único ·
+el modelo carga y **reproduce el 100 %** del parquet · sanidad por categoría (DIRECTO < CATALOGO < COMPETITIVO) · RMSE < 150.
+
+### 9.8 Cómo ejecutar el notebook (headless)
+
+```bash
+# 1) Registrar el .venv como kernel de Jupyter (una sola vez)
+.venv/Scripts/python.exe -m ipykernel install --user --name essalud --display-name "EsSalud .venv"
+
+# 2) Ejecutar el notebook de punta a punta (regenera parquet + modelo)
+.venv/Scripts/python.exe -m jupyter nbconvert --to notebook --execute --inplace \
+  --ExecutePreprocessor.kernel_name=essalud mlpredicts/LeadTime_Predictor.ipynb
+```
+
+> `nbconvert` fija el CWD del kernel a la carpeta del notebook, por lo que `../bi` y `models/`
+> resuelven correctamente.
+
+### 9.9 Nota (fuera del alcance de la Fase 4)
+
+~48 % de las filas de la Fact tienen `Monto_Adjudicado_Soles = 0` (dato faltante de la capa
+Gold/sintéticos, aguas arriba). No afecta al modelo de lead time (el monto pesa ~3 % en la
+importancia), pero conviene sanearlo en el paso `synth`/`gold` si Power BI usará montos. La
+**integración con Power BI queda documentada en el plan pero no se ejecuta** en esta fase.

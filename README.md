@@ -24,12 +24,13 @@ Bronze  ──►  Silver  ──►  Gold
 5. [Instalación y configuración](#5-instalación-y-configuración)
 6. [Variables de entorno](#6-variables-de-entorno)
 7. [Uso — Capa Bronze (CLI)](#7-uso--capa-bronze-cli)
-8. [Uso — Capa Silver / Gold (PySpark)](#8-uso--capa-silver--gold-pyspark)
+8. [Uso — Capas Silver / Gold y orquestación (CLI)](#8-uso--capas-silver--gold-y-orquestación-cli)
 9. [Modelo estrella (Data Warehouse)](#9-modelo-estrella-data-warehouse)
-10. [Orquestación con Apache Airflow](#10-orquestación-con-apache-airflow)
-11. [Tests y CI](#11-tests-y-ci)
-12. [Layout de datos](#12-layout-de-datos)
-13. [Notas de versionado](#13-notas-de-versionado)
+10. [Modelado predictivo del Lead Time (Fase 4 — ML)](#10-modelado-predictivo-del-lead-time-fase-4--ml)
+11. [Orquestación con Apache Airflow](#11-orquestación-con-apache-airflow)
+12. [Tests y CI](#12-tests-y-ci)
+13. [Layout de datos](#13-layout-de-datos)
+14. [Notas de versionado](#14-notas-de-versionado)
 
 ---
 
@@ -44,6 +45,7 @@ Bronze  ──►  Silver  ──►  Gold
 - **Carga atómica al DW:** Spark escribe a tablas `stg.*` vía JDBC; un stored procedure (`oro.usp_Load_From_Staging`) las mueve a producción en **una sola transacción** (si Spark falla a mitad, producción queda intacta).
 - **Diseño fail-safe:** JSON corrupto capturado en `_corrupt_record` sin abortar el job; UDFs con *graceful degradation* por elemento; coerción de datos sucios a `NULL` (`spark.sql.ansi.enabled=false`).
 - **Orquestación empresarial:** DAGs de **Apache Airflow** (Docker) para ingesta y transformación programadas.
+- **Capa de ML predictiva (Fase 4):** modelo **XGBoost** que estima el *Lead Time* contractual (días entre convocatoria y suscripción) y publica las predicciones en `bi/Pred_Lead_Time.parquet` para Power BI — ver [§10](#10-modelado-predictivo-del-lead-time-fase-4--ml).
 
 ---
 
@@ -112,6 +114,9 @@ essalud-pipeline/
 │   ├── CONOSCE_2025_essalud.csv  # Resumen EsSalud 2025 bienes (fuente synth)
 │   └── gemini_cache.json   # Caché local de respuestas Gemini
 ├── test/               # Suite pytest (incluye tests de integración Spark)
+├── mlpredicts/         # Fase 4 — modelo predictivo de Lead Time (notebook + modelo joblib + tests)
+├── ml/                 # requirements.txt del entorno ML de la Fase 4 (xgboost, sklearn, jupyter)
+├── bi/                 # Tablas Gold en Parquet para BI (7 tablas + Pred_Lead_Time.parquet)
 ├── data/               # Data Lake local (bronze/ · silver/ · audit/) — ignorado por git
 ├── Dockerfile          # Imagen Airflow extendida con Java 17 (JRE) para PySpark
 ├── docker-compose.yaml # Stack Airflow: Postgres, Redis, Webserver, Scheduler, Worker
@@ -335,7 +340,50 @@ La granularidad del modelo es **nivel Red Asistencial** (la API OCDS identifica 
 
 ---
 
-## 10. Orquestación con Apache Airflow
+## 10. Modelado predictivo del Lead Time (Fase 4 — ML)
+
+Una capa de **Machine Learning aditiva** —no toca el pipeline— que estima el **Lead Time
+contractual** (días entre la convocatoria y la suscripción del contrato) de cada ítem,
+incluidos los procesos 2024-2025 aún en curso. Vive en `mlpredicts/` y consume las tablas
+Parquet de `bi/` producidas por la capa Gold.
+
+> [!NOTE]
+> Esta capa usa el venv de ML (`.venv`, `ml/requirements.txt`: pandas, scikit-learn,
+> **xgboost**), **no** el entorno de Spark. Requiere haber ejecutado `python main.py gold`.
+
+**Modelo.** XGBoost vs. Random Forest, seleccionados por RMSE con validación cruzada
+estratificada (5 folds por Red Asistencial). Gana **XGBoost**, con el objetivo modelado en
+escala **log1p** (`TransformedTargetRegressor`) para que las predicciones sean siempre ≥ 0
+(ningún proceso competitivo predicho en 0 días). Métricas: **RMSE ≈ 55 d · MAE 15.8 d · R² ≈ 0.85**.
+
+**Entregable:** `bi/Pred_Lead_Time.parquet` (9 292 filas) — histórico real + predicho por
+proceso, listo para la Vista Táctica de Power BI.
+
+| Columna | Descripción |
+|---|---|
+| `ID_Registro` | Clave estable por fila (para relaciones en Power BI) |
+| `Anio_Fiscal` · `Red_Asistencial` · `Categoria_Proceso` | Dimensiones de corte |
+| `Lead_Time_Actual` | Días reales (`NaN` si falta una fecha o son inconsistentes) |
+| `Lead_Time_Predicho` | Predicción del modelo (siempre ≥ 0) |
+| `Residual` | `Actual − Predicho` (`NaN` si no hay Actual) |
+
+```powershell
+# Registrar el .venv como kernel de Jupyter (una sola vez)
+.venv\Scripts\python.exe -m ipykernel install --user --name essalud --display-name "EsSalud .venv"
+
+# Ejecutar el notebook de punta a punta (regenera parquet + modelo)
+.venv\Scripts\python.exe -m jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=essalud mlpredicts\LeadTime_Predictor.ipynb
+
+# Verificar el entregable (10 comprobaciones; .venv no trae pytest → se corre como script)
+$env:PYTHONUTF8 = 1; .venv\Scripts\python.exe mlpredicts\test_pred_lead_time.py
+```
+
+El plan completo y la guía de integración con Power BI están en
+[`fase4-lead-time-predictivo.md`](fase4-lead-time-predictivo.md).
+
+---
+
+## 11. Orquestación con Apache Airflow
 
 Stack completo en Docker (Postgres, Redis, Webserver, Scheduler, Worker). La imagen extiende `apache/airflow:2.9.1` e instala **Java 17 (JRE)** para poder ejecutar PySpark dentro del worker.
 
@@ -359,7 +407,7 @@ docker compose up -d --build
 
 ---
 
-## 11. Tests y CI
+## 12. Tests y CI
 
 ```powershell
 # Ejecutar toda la suite
@@ -378,7 +426,7 @@ flake8 app/ test/
 
 ---
 
-## 12. Layout de datos
+## 13. Layout de datos
 
 ```text
 data/
@@ -395,7 +443,7 @@ Todo el contenido de `data/` se **genera automáticamente** al ejecutar el pipel
 
 ---
 
-## 13. Notas de versionado
+## 14. Notas de versionado
 
 Para mantener el repositorio limpio, los siguientes elementos están en `.gitignore` y **no se suben** al remoto:
 
@@ -403,4 +451,4 @@ Para mantener el repositorio limpio, los siguientes elementos están en `.gitign
 - **Archivos de instrucciones de IA:** `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` — son locales; cada quien los edita sin afectar el repo.
 - **`.env`** y credenciales.
 
-Archivos de documentación que **sí** se versionan: `README.md`, `CHANGELOG.md` (historial detallado de cambios) y `PLAN_MIGRACION_PYSPARK.md` (plan de migración a PySpark).
+Archivos de documentación que **sí** se versionan: `README.md`, `CHANGELOG.md` (historial detallado de cambios) y `fase4-lead-time-predictivo.md` (plan de la Fase 4 de ML + guía de Power BI).

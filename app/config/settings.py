@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 # dentro del contenedor Linux y rompería Spark.
 load_dotenv(os.getenv("OCDS_ENV_FILE") or None)
 
-# Base del proyecto (sube 3 niveles: settings.py -> config/ -> app/ -> bi/)
+# Base del proyecto (sube 3 niveles: settings.py -> config/ -> app/ -> data/mart/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 @dataclass
@@ -29,8 +29,8 @@ class Settings:
     GOLD_DIR: Path = Path(os.getenv("OCDS_GOLD_DIR", str(DATA_DIR / "gold")))
     # Carpeta para Power BI: export de las tablas oro.* del DW a Parquet (incluye
     # Dim_Tiempo y Dim_Ubigeo, que las genera el DDL de SQL Server).
-    BI_DIR: Path = Path(os.getenv("OCDS_BI_DIR", str(PROJECT_ROOT / "bi")))
-    EXTRA_DATA_DIR: Path = Path(os.getenv("OCDS_EXTRA_DATA_DIR", str(PROJECT_ROOT / "extra-data")))
+    BI_DIR: Path = Path(os.getenv("OCDS_BI_DIR", str(PROJECT_ROOT / "data" / "mart")))
+    EXTRA_DATA_DIR: Path = Path(os.getenv("OCDS_EXTRA_DATA_DIR", str(PROJECT_ROOT / "reference")))
     AUDIT_DIR: Path = DATA_DIR / "audit"
     EXECUTIONS_DIR: Path = AUDIT_DIR / "executions"
     QUALITY_CHECKS_DIR: Path = AUDIT_DIR / "quality_checks"

@@ -204,9 +204,9 @@ def export_dims_to_bi(dims: Dict[str, DataFrame], bi_dir) -> None:
     for key, table in BI_TABLE_MAP.items():
         df = dims.get(key)
         if df is None:
-            log.warning(f"  bi/: '{key}' no disponible en dims; se omite {table}.")
+            log.warning(f"  data/mart/: '{key}' no disponible en dims; se omite {table}.")
             continue
         pandas_df = df.toPandas()
         out = bi_path / f"{table}.parquet"
         pandas_df.to_parquet(out, index=False)
-        log.info(f"  bi/: {table} ({len(pandas_df)} filas) -> {out.name}")
+        log.info(f"  data/mart/: {table} ({len(pandas_df)} filas) -> {out.name}")

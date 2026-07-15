@@ -2,7 +2,7 @@
 
 Guía paso a paso para ejecutar y revisar **todo** el proyecto después de hacer
 `git pull`: pipeline por terminal, stack Docker (Airflow + SQL Server + MailHog),
-carga al Data Warehouse, ML de la Fase 4 y alertas de la Fase 6.
+carga al Data Warehouse, modelo predictivo ML y alertas operativas.
 
 Todo está verificado end-to-end (2026-07-02, CHANGELOG §10). Los comandos son
 PowerShell sobre Windows salvo que se indique lo contrario.
@@ -46,21 +46,50 @@ Copy-Item .env.example .env
 .\.venv\Scripts\python.exe -c "import pyspark, pandas, pyodbc, google.genai; print('entorno OK')"
 ```
 
+## 1.5. Variables de entorno
+
+Configuradas en `.env` (raíz del proyecto):
+
+| Variable | Propósito |
+|---|---|
+| `OCDS_API_BASE_URL` | URL base de la API OCDS |
+| `OCDS_ESSALUD_RUC` | RUC del comprador a filtrar (default: EsSalud) |
+| `OCDS_USE_R2` | Habilita replicación a Cloudflare R2 (`True`/`False`) |
+| `OCDS_R2_ACCOUNT_ID` / `ACCESS_KEY` / `SECRET_KEY` / `BUCKET_NAME` | Credenciales de R2 |
+| `OCDS_LOG_LEVEL` | Nivel de log en consola |
+| `OCDS_MAX_RETRIES` / `OCDS_BACKOFF_FACTOR` | Estrategia de reintentos HTTP |
+| `OCDS_SILVER_DIR` / `OCDS_EXTRA_DATA_DIR` | Directorio de staging Silver / maestros Excel |
+| `OCDS_SPARK_MASTER` | Master de Spark (default `local[4]`; `local[*]`/cluster en Linux) |
+| `OCDS_SPARK_JARS_PACKAGES` / `OCDS_SPARK_JARS` | Driver mssql-jdbc (coordenadas Maven / jars locales) |
+| `OCDS_DW_CONN_STRING` | Conexión SQLAlchemy/pyodbc para DDL + stored procedure |
+| `OCDS_DW_JDBC_URL` / `USER` / `PASSWORD` / `BATCHSIZE` | Conexión JDBC para los writes de Spark. |
+| `OCDS_DW_*_DOCKER` (`CONN_STRING` / `JDBC_URL` / `JDBC_USER` / `JDBC_PASSWORD`) | ★ Cadenas del perfil `--profile docker`: apuntan al contenedor `sqlserver` |
+| `MSSQL_SA_PASSWORD` | ★ Password `sa` del SQL Server en contenedor (default `EsSalud2024!`) |
+| `SMTP_HOST` / `PORT` / `USER` / `PASSWORD` / `STARTTLS` / `FROM` / `TO` | ★ Envío del correo de alertas operativas. |
+| `OCDS_ENV_FILE` | ★ Dotenv alternativo (el compose lo fija a `.env.docker` dentro del contenedor) |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | Limpieza IA en Silver (vacío = no-op) |
+
 ## 2. Pipeline completo por terminal (sin Docker)
 
 El destino Gold por defecto es **Parquet** — no necesita SQL Server.
 
 ```powershell
 # (a) Bronze — solo si data/bronze/ está vacío (~2 300 JSON, tarda por la API)
-python main.py bronze --years 2022 2023 2024 2025
+# Modo Targeted (extracción dirigida por RUC y año):
+python app/cli.py targeted --year 2024 --limit 10
+python app/cli.py targeted --ruc 20131257750 --year 2023 --limit 0
+# Modo Bulk (extracción masiva SEACE):
+python app/cli.py bulk --source SEACE --type JSON --year 2023 --month 11
+# Alias:
+python app/cli.py bronze --years 2022 2023 2024 2025
 
 # (b) Orden canónico: Silver → Synth → Gold
-python main.py silver --rebuild     # aplana Bronze → data/silver/staging_flat
-python main.py synth                # sintéticos 2024/2025 + adendas (¡OBLIGATORIO antes de gold!)
-python main.py gold                 # dims + Fact → data/gold/ + bi/*.parquet
+python app/cli.py silver --rebuild     # aplana Bronze → data/silver/staging_flat
+python app/cli.py synth                # sintéticos 2024/2025 + adendas (¡OBLIGATORIO antes de gold!)
+python app/cli.py gold                 # dims + Fact → data/gold/ + data/mart/*.parquet
 
 # (c) Verificar el resultado
-python -c "import pandas as pd; f=pd.read_parquet('bi/Fact_Ordenes_Y_Contratos.parquet'); print('Fact:', len(f))"
+python -c "import pandas as pd; f=pd.read_parquet('data/mart/Fact_Ordenes_Y_Contratos.parquet'); print('Fact:', len(f))"
 # Esperado: Fact: 9292
 ```
 
@@ -69,10 +98,10 @@ python -c "import pandas as pd; f=pd.read_parquet('bi/Fact_Ordenes_Y_Contratos.p
 > ⚠️ Regenera los datos **siempre desde el host**, no desde el DAG de Airflow
 > (el `synth` del contenedor muestrea un subconjunto distinto — CHANGELOG §10.5).
 
-## 3. Fase 4 — ML de Lead Time
+## 3. Modelo Predictivo (ML de Lead Time)
 
 ```powershell
-# Requiere bi/*.parquet (paso 2). El notebook reentrena y publica bi/Pred_Lead_Time.parquet
+# Requiere data/mart/*.parquet (paso 2). El notebook reentrena y publica data/mart/Pred_Lead_Time.parquet
 .\.venv\Scripts\python.exe -m jupyter nbconvert --to notebook --execute --inplace `
   --ExecutePreprocessor.kernel_name=essalud mlpredicts\LeadTime_Predictor.ipynb
 
@@ -81,29 +110,29 @@ $env:PYTHONUTF8 = 1; .\.venv\Scripts\python.exe mlpredicts\test_pred_lead_time.p
 ```
 
 > El notebook está **gitignored** (`*.ipynb`); si no lo tienes, pide el archivo o
-> reconstrúyelo según `fase4-lead-time-predictivo.md`. El `best_model.joblib`
+> reconstrúyelo según `modelo-predictivo.md`. El `best_model.joblib`
 > commiteado requiere scikit-learn compatible con el que lo entrenó: si `joblib.load`
 > falla con `AttributeError`, re-ejecuta el notebook (reentrena y lo regenera).
 
-## 4. Fase 6 — Alertas de abastecimiento
+## 4. Alertas de Abastecimiento
 
 ```powershell
-# Vista previa (genera bi/Alertas.parquet e imprime el correo, no envía nada)
-python main.py alert --dry-run
+# Vista previa (genera data/mart/Alertas.parquet e imprime el correo, no envía nada)
+python app/cli.py alert --dry-run
 
 # Envío real. Default del .env: MailHog local (levántalo antes: paso 5)
-python main.py alert
+python app/cli.py alert
 
 # Variantes
-python main.py alert --source hhi                    # solo concentración HHI
-python main.py alert --source leadtime --sigma 2.5   # solo lead time, umbral más estricto
-python main.py alert --to otra.persona@unmsm.edu.pe  # destinatario puntual
+python app/cli.py alert --source hhi                    # solo concentración HHI
+python app/cli.py alert --source leadtime --sigma 2.5   # solo lead time, umbral más estricto
+python app/cli.py alert --to otra.persona@unmsm.edu.pe  # destinatario puntual
 ```
 
 Ver el correo capturado: **http://localhost:8025** (UI de MailHog).
 Para Gmail real: en `.env` configura `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`,
 `SMTP_STARTTLS=true`, `SMTP_USER`/`SMTP_PASSWORD` (App Password).
-La variante institucional sin código: [`fase6-powerautomate.md`](fase6-powerautomate.md).
+La variante institucional sin código: [`alertas-automatizadas.md`](alertas-automatizadas.md).
 
 ## 5. Stack Docker (Airflow + SQL Server + MailHog)
 
@@ -166,7 +195,7 @@ docker exec essalud-pipeline-airflow-worker-1 bash -c `
 
 ```powershell
 # Con el stack arriba (paso 5), cargar el modelo estrella desde el host:
-python main.py gold --target sqlserver --profile docker
+python app/cli.py gold --target sqlserver --profile docker
 ```
 
 Revisión (desde el host, con sqlcmd o cualquier cliente en `localhost,11433`):
@@ -189,7 +218,7 @@ ALTER SERVER ROLE dbcreator ADD MEMBER essalud_user;   -- o crear la BD a mano
 
 ```powershell
 # .env: OCDS_DW_CONN_STRING (pyodbc) + OCDS_DW_JDBC_URL/USER/PASSWORD (ver .env.example)
-python main.py gold --target sqlserver --profile local
+python app/cli.py gold --target sqlserver --profile local
 ```
 
 **Validaciones esperadas** (local o contenedor):
@@ -206,8 +235,8 @@ python main.py gold --target sqlserver --profile local
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q                       # suite completa (~12 min, incluye Spark)
 .\.venv\Scripts\python.exe -m pytest -q --ignore=test/test_silver_spark.py   # rápida (~4 min)
-.\.venv\Scripts\python.exe -m pytest test/test_alerting.py -q # solo Fase 6
-flake8 app dags main.py --max-line-length=127                 # lint (criterio del CI)
+.\.venv\Scripts\python.exe -m pytest test/test_alerting.py -q # solo alertas
+flake8 app dags app/cli.py --max-line-length=127                 # lint (criterio del CI)
 ```
 
 Esperado: **65 passed, 2 skipped** (los 2 skips son DAG-integrity/API si no aplican).
@@ -219,7 +248,7 @@ Bronze y **solo si hay credenciales**. Sin credenciales todo corre 100 % local.
 
 ```powershell
 # .env: OCDS_USE_R2=true + OCDS_R2_ACCOUNT_ID/ACCESS_KEY/SECRET_KEY/BUCKET_NAME
-python main.py targeted --year 2024 --limit 10   # cada JSON se replica al bucket
+python app/cli.py targeted --year 2024 --limit 10   # cada JSON se replica al bucket
 ```
 
 ## 10. Troubleshooting
@@ -231,14 +260,14 @@ python main.py targeted --year 2024 --limit 10   # cada JSON se replica al bucke
 | `No module named 'app'` dentro de una tarea Spark en Airflow | Falta `PYTHONPATH` en el contenedor | Ya fijado en el compose; verifica `docker exec ...-worker-1 python -c "import app"` |
 | `Pandas >= 2.2.0 must be installed` en el worker | Imagen vieja sin el pin de pandas | `docker compose build && docker compose up -d` |
 | Spark en Windows crashea con muchos workers UDF | Bug conocido de Windows | Mantén `OCDS_SPARK_MASTER=local[4]` (default) |
-| `test_pred_lead_time.py` falla en conteos o reproducibilidad | `bi/` regenerado desde el DAG (subset synth distinto) o `joblib` de otro sklearn | Regenera desde el host (§2) y re-ejecuta el notebook (§3) |
+| `test_pred_lead_time.py` falla en conteos o reproducibilidad | `data/mart/` regenerado desde el DAG (subset synth distinto) o `joblib` de otro sklearn | Regenera desde el host (§2) y re-ejecuta el notebook (§3) |
 | El correo no llega | `SMTP_HOST` vacío o MailHog abajo | `docker compose up -d mailhog` y revisa `.env` (§4) |
-| `gold` casi vacío en 2024/2025 | Se saltó `synth` | `python main.py synth` y repite `gold` |
+| `gold` casi vacío en 2024/2025 | Se saltó `synth` | `python app/cli.py synth` y repite `gold` |
 
 ## 11. Referencias
 
 - [`README.md`](../README.md) — visión general y arquitectura
 - [`CHANGELOG.md`](../CHANGELOG.md) — §10: detalle de todos los cambios 2026-07-02
-- [`fase4-lead-time-predictivo.md`](../fase4-lead-time-predictivo.md) — plan ML + Power BI
-- [`fase6-powerautomate.md`](fase6-powerautomate.md) — alertas vía Power BI Service (sin código)
-- [`ARQUITECTURA.md`](../ARQUITECTURA.md) — diseño detallado del framework
+- [`modelo-predictivo.md`](modelo-predictivo.md) — modelo ML + Power BI
+- [`alertas-automatizadas.md`](alertas-automatizadas.md) — alertas vía Power BI Service (sin código)
+- [`arquitectura.md`](arquitectura.md) — diseño detallado del framework

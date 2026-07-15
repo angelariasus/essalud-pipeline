@@ -71,7 +71,7 @@ data/audit/
 data/silver/
 data/gold/
 # Power BI export (Parquet de las tablas oro.* del DW)
-bi/
+data/mart/
 
 # AI assistant instruction files (local-only, not versioned)
 CLAUDE.md

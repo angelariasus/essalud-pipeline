@@ -1,8 +1,8 @@
-# Fase 6 — Guía Power BI Service + Power Automate (producción institucional)
+# Guía Power BI Service + Power Automate (Alertas Operativas)
 
 Camino **sin código** para que el dashboard dispare el correo de alerta desde la
 cuenta corporativa. Es el equivalente institucional del prototipo Python ya
-operativo (`python main.py alert`); ambos consumen las mismas fuentes de `bi/`.
+operativo (`python app/cli.py alert`); ambos consumen las mismas fuentes de `data/mart/`.
 
 > **Requisitos**: licencia **Power BI Pro o PPU** en la cuenta institucional,
 > permisos para crear flujos en **Power Automate** y el conector "Office 365
@@ -12,11 +12,11 @@ operativo (`python main.py alert`); ambos consumen las mismas fuentes de `bi/`.
 
 ## 1. Construir el `.pbix` (si aún no existe)
 
-1. Power BI Desktop → **Obtener datos → Parquet** e importar, desde `<repo>/bi/`:
+1. Power BI Desktop → **Obtener datos → Parquet** e importar, desde `<repo>/data/mart/`:
    - `Fact_Ordenes_Y_Contratos.parquet`, las 6 `Dim_*.parquet`
-   - `Pred_Lead_Time.parquet` (Fase 4 — ver medidas DAX en `fase4-lead-time-predictivo.md`)
+   - `Pred_Lead_Time.parquet` (Modelo predictivo — ver medidas DAX en `modelo-predictivo.md`)
    - **`Alertas.parquet`** ← fuente de la Vista Operativa (la genera
-     `python main.py alert` o el DAG `ocds_alerting`)
+     `python app/cli.py alert` o el DAG `ocds_alerting`)
 2. Vista Modelo → relaciones:
    - `Fact[FK_*]` ↔ `Dim_*[SK_*]` (muchos a uno)
    - `Alertas[Red_Asistencial]` ↔ `Dim_Entidad_Compradora[Red_Asistencial]`
@@ -35,7 +35,7 @@ operativo (`python main.py alert`); ambos consumen las mismas fuentes de `bi/`.
 
 1. Power BI Desktop → **Publicar** → área de trabajo institucional.
 2. (Opcional) Configurar **actualización programada** del dataset apuntando a un
-   gateway con acceso a la carpeta `bi/` (o republicar tras cada corrida del pipeline).
+   gateway con acceso a la carpeta `data/mart/` (o republicar tras cada corrida del pipeline).
 
 ## 4. Flujo Power Automate (botón en el informe)
 
@@ -88,6 +88,6 @@ operativo (`python main.py alert`); ambos consumen las mismas fuentes de `bi/`.
   la fila de la alerta antes de pulsar el botón.
 - El paso 4 (condición) evita notificaciones accidentales desde filas sin alerta
   real si el visual recibiera el dataset completo.
-- Alternativa ya operativa sin licencias: `python main.py alert --to <correo>`
+- Alternativa ya operativa sin licencias: `python app/cli.py alert --to <correo>`
   (SMTP Gmail/MailHog) o el DAG `ocds_alerting` de Airflow, que corre
   automáticamente tras cada carga Gold.

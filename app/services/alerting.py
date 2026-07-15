@@ -7,7 +7,7 @@ anómalo (retraso real muy superior al predicho por el modelo de la Fase 4), y
 notifica por correo formal al área de abastecimiento con los 3 campos clave:
 **RUC del proveedor dominante, denominación del medicamento y Red Asistencial**.
 
-Fuentes (Parquet de `bi/`, sin Spark ni SQL Server — pandas puro):
+Fuentes (Parquet de `data/mart/`, sin Spark ni SQL Server — pandas puro):
   - `Fact_Ordenes_Y_Contratos.parquet` + dims -> réplica pandas de la vista
     `oro.vw_Matriz_Riesgo_HHI` (mismos umbrales: HHI>=8000, dominante>=80%).
   - `Pred_Lead_Time.parquet` (Fase 4) -> Residual = Actual - Predicho; una fila
@@ -18,7 +18,7 @@ se deriva de `Restriccion_Uso` del Petitorio: un medicamento con códigos de
 restricción de uso se trata como de uso crítico para el semáforo.
 
 Salidas:
-  - `bi/Alertas.parquet` — consolidado (ambas fuentes) para la Vista Operativa
+  - `data/mart/Alertas.parquet` — consolidado (ambas fuentes) para la Vista Operativa
     de Power BI (visual Power Automate lee estas columnas).
   - Correo SMTP (Gmail App Password o MailHog local), ver `send_alerts()`.
 
@@ -49,7 +49,7 @@ LEADTIME_SIGMA = 2.0
 
 ALERTAS_FILENAME = "Alertas.parquet"
 
-# Columnas del consolidado bi/Alertas.parquet (contrato con Power BI / correo).
+# Columnas del consolidado data/mart/Alertas.parquet (contrato con Power BI / correo).
 ALERTAS_COLS = [
     "Tipo_Alerta", "Anio", "Red_Asistencial", "Medicamento",
     "RUC_Proveedor", "Nombre_Proveedor", "Metrica", "Valor", "Umbral", "Detalle",
@@ -200,7 +200,7 @@ def build_leadtime_alerts(
     return anom
 
 
-# ── Consolidado bi/Alertas.parquet ───────────────────────────────────────────
+# ── Consolidado data/mart/Alertas.parquet ───────────────────────────────────────────
 def build_alertas(
     bi_dir: Optional[Path] = None,
     sigma: float = LEADTIME_SIGMA,
@@ -208,7 +208,7 @@ def build_alertas(
 ) -> pd.DataFrame:
     """
     Une ambas fuentes en el esquema `ALERTAS_COLS` y (opcional) lo persiste en
-    `bi/Alertas.parquet` para la Vista Operativa de Power BI.
+    `data/mart/Alertas.parquet` para la Vista Operativa de Power BI.
     """
     frames = []
 
@@ -302,7 +302,7 @@ def render_email(alertas: pd.DataFrame, to: str, limit: int = 20) -> MIMEMultipa
             f"{r['Metrica']}={r['Valor']:.0f} (umbral {r['Umbral']:.0f}). {r['Detalle']}"
         )
     if n_total > limit:
-        lines.append(f"... y {n_total - limit} alertas adicionales (ver bi/Alertas.parquet).")
+        lines.append(f"... y {n_total - limit} alertas adicionales (ver data/mart/Alertas.parquet).")
     lines += [
         "",
         "Se solicita evaluar acciones de diversificación de proveedores y/o "
@@ -333,7 +333,7 @@ def render_email(alertas: pd.DataFrame, to: str, limit: int = 20) -> MIMEMultipa
       </tr>
       {rows}
     </table>
-    {f"<p><i>... y {n_total - limit} alertas adicionales (ver bi/Alertas.parquet).</i></p>" if n_total > limit else ""}
+    {f"<p><i>... y {n_total - limit} alertas adicionales (ver data/mart/Alertas.parquet).</i></p>" if n_total > limit else ""}
     <p>Se solicita evaluar acciones de diversificación de proveedores y/o seguimiento
     del proceso según corresponda.</p>
     <p>Atentamente,<br/>Sistema de Monitoreo BI — EsSalud Pipeline
@@ -370,7 +370,7 @@ def send_alerts(
     bi_dir: Optional[Path] = None,
 ) -> int:
     """
-    Flujo completo: construye `bi/Alertas.parquet`, filtra por `source`
+    Flujo completo: construye `data/mart/Alertas.parquet`, filtra por `source`
     (hhi | leadtime | all) y envía (o imprime, con `dry_run`) el correo.
     Retorna el número de alertas notificadas.
     """

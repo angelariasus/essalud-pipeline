@@ -35,7 +35,7 @@ essalud-pipeline/
 ├── PLAN_MIGRACION_PYSPARK.md     ← Plan de migración a PySpark
 ├── README.md                     ← README del proyecto
 ├── docker-compose.yaml           ← Stack completo Airflow (Postgres, Redis, Webserver, Scheduler, Worker, Triggerer, Flower)
-├── main.py                       ← CLI entrypoint (targeted / bulk)
+├── app/cli.py                       ← CLI entrypoint (targeted / bulk)
 ├── pytest.ini                    ← Config pytest: pythonpath = .
 ├── requirements.txt              ← Dependencias runtime
 ├── requirements-dev.txt          ← Dependencias dev (pytest, flake8, apache-airflow)
@@ -80,7 +80,7 @@ essalud-pipeline/
 │   ├── ocds_dag.py               ← 2 DAGs: targeted (weekly) + bulk (monthly)
 │   └── silver_dag.py             ← 1 DAG: silver_pipeline (monthly, trigger desde targeted)
 │
-├── star-schema/
+├── sql/
 │   ├── EsSalud_StarSchema_DDL.sql  ← DDL completo: 7 tablas + 3 vistas + validación post-carga
 │   └── EsSalud_Staging_DDL.sql     ← DDL staging + oro.usp_Load_From_Staging (carga atómica)
 │
@@ -98,7 +98,7 @@ essalud-pipeline/
 │       └── executions/
 │           └── ocds_extraction.log
 │
-├── extra-data/
+├── reference/
 │   ├── Petitorio-Publicar-hasta-Res-N_-063-2026.xls     ← 996 medicamentos
 │   └── 5992483-*.xlsx                                    ← 403 centros / 35 redes
 │
@@ -135,7 +135,7 @@ OCDS_R2_SECRET_KEY=
 OCDS_R2_BUCKET_NAME=
 
 OCDS_SILVER_DIR=data/silver
-OCDS_EXTRA_DATA_DIR=extra-data
+OCDS_EXTRA_DATA_DIR=reference
 OCDS_DW_CONN_STRING=mssql+pyodbc://sa:123ABC%40%40@localhost:11423/DW_EsSalud_Adquisiciones?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
 ```
 
@@ -166,7 +166,7 @@ testpaths = test
 
 ## 3. Archivos modificados
 
-### 3.1 `main.py` — CLI entrypoint
+### 3.1 `app/cli.py` — CLI entrypoint
 
 **Antes**: Contenía trailing whitespace en múltiples líneas (argumentos de argparse).
 
@@ -296,14 +296,14 @@ from botocore.exceptions import ClientError
 
 **Antes**: Años y meses hardcodeados:
 ```python
-bash_command='cd /opt/airflow/bi && python main.py targeted --year 2024 --limit 100',
-bash_command='cd /opt/airflow/bi && python main.py bulk --source SEACE --type JSON --year 2023 --month 11',
+bash_command='cd /opt/airflow/bi && python app/cli.py targeted --year 2024 --limit 100',
+bash_command='cd /opt/airflow/bi && python app/cli.py bulk --source SEACE --type JSON --year 2023 --month 11',
 ```
 
 **Después**: Macros Jinja + TriggerDagRunOperator de Targeted → Silver:
 ```python
 bash_command=(
-    "cd /opt/airflow/bi && python main.py targeted"
+    "cd /opt/airflow/bi && python app/cli.py targeted"
     " --year {{ execution_date.year }}"
     " --limit 100"
 ),
@@ -340,7 +340,7 @@ def _run_silver(**context):
 
 **Nota**: Se eliminó la importación de `BashOperator` (ya no necesaria en este DAG).
 
-### 3.11 `star-schema/EsSalud_StarSchema_DDL (3).sql` → `EsSalud_StarSchema_DDL.sql`
+### 3.11 `sql/EsSalud_StarSchema_DDL (3).sql` → `EsSalud_StarSchema_DDL.sql`
 
 **Antes**: Nombre con espacio y versión parentética: `EsSalud_StarSchema_DDL (3).sql`
 
@@ -348,7 +348,7 @@ def _run_silver(**context):
 
 **Referencia**: `app/pipelines/silver_layer.py:36` actualizada para usar el nuevo nombre.
 
-### 3.12 `star-schema/EsSalud_StarSchema_DDL.sql` — WHILE loop → CTE recursivo + Sección 9
+### 3.12 `sql/EsSalud_StarSchema_DDL.sql` — WHILE loop → CTE recursivo + Sección 9
 
 **Antes (Dim_Tiempo)**:
 ```sql
@@ -501,7 +501,7 @@ assert len(dag_bag.dag_ids) >= 1, "No DAGs found in dags/"
 
 | Acción | Ruta anterior | Ruta nueva | Motivo |
 |---|---|---|---|
-| Renombrado | `star-schema/EsSalud_StarSchema_DDL (3).sql` | `star-schema/EsSalud_StarSchema_DDL.sql` | Espacio y sufijo `(3)` no estándar |
+| Renombrado | `sql/EsSalud_StarSchema_DDL (3).sql` | `sql/EsSalud_StarSchema_DDL.sql` | Espacio y sufijo `(3)` no estándar |
 | Eliminado | `data/bronze/records/20131257750/ocds-dgv273-seacev3-2024-2543-787.json` | — | Duplicado exacto (mismo hash SHA256) del existente en `2024/` |
 | Eliminado | `data/bronze/records/20131257750/ocds-dgv273-seacev3-999694.json` | — | Duplicado exacto (mismo hash SHA256) del existente en `2024/` |
 | Movido | `data/bronze/records/20131257750/ocds-dgv273-seacev3-99976.json` | `data/bronze/records/20131257750/2015/` | Organizado por año |
@@ -574,13 +574,13 @@ docker run -d --name essalud-sqlserver \
 ```bash
 # Extracción targeted por año (EsSalud, RUC 20131257750)
 # Sin --limit, descarga TODOS los registros del año (puede tomar varios minutos)
-python main.py targeted --year 2022 --limit 0
-python main.py targeted --year 2023 --limit 0
-python main.py targeted --year 2024 --limit 0
-python main.py targeted --year 2025 --limit 0
+python app/cli.py targeted --year 2022 --limit 0
+python app/cli.py targeted --year 2023 --limit 0
+python app/cli.py targeted --year 2024 --limit 0
+python app/cli.py targeted --year 2025 --limit 0
 
 # Para pruebas rápidas, limitar a N registros:
-python main.py targeted --year 2024 --limit 10
+python app/cli.py targeted --year 2024 --limit 10
 ```
 
 Los archivos se guardan en `data/bronze/records/20131257750/<year>/<ocid>.json`.
@@ -702,10 +702,10 @@ El skip corresponde a `test_dag_integrity.py` si `apache-airflow` no está insta
 
 ```bash
 # Lint estricto (errores de sintaxis y nombres indefinidos) — DEBE dar 0
-flake8 app dags main.py --count --select=E9,F63,F7,F82 --show-source --statistics
+flake8 app dags app/cli.py --count --select=E9,F63,F7,F82 --show-source --statistics
 
 # Lint de estilo (no bloqueante, salida 0 incluso con warnings)
-flake8 app dags main.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+flake8 app dags app/cli.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 ```
 
 ### 6.7 Airflow (opcional, para orquestación)
@@ -741,13 +741,13 @@ Esta sesión consolidó el modelo a **granularidad nivel Red Asistencial** (el O
 ### 7.2 Bug #6 — DDL no idempotente al recargar con datos existentes
 
 **Severidad**: ALTA
-**Archivo**: `star-schema/EsSalud_StarSchema_DDL.sql`
+**Archivo**: `sql/EsSalud_StarSchema_DDL.sql`
 **Síntoma**: al re-ejecutar el DDL sobre un DW ya poblado, `DROP TABLE` de una dimensión fallaba con error 3726 (*"Could not drop object ... referenced by a FOREIGN KEY constraint"*), porque la `Fact` (y `Dim_Entidad`) existentes seguían referenciándola. La primera carga no fallaba porque el DW estaba vacío.
 **Fix**: bloque de **LIMPIEZA PREVIA** al inicio del DDL que elimina las tablas en orden inverso de dependencias (`Fact` → `Dim_Entidad` → resto) antes de recrearlas. El pipeline Silver ahora se puede re-ejecutar sin intervención manual.
 
 ### 7.3 Recarga con muestra de 100 registros de 2024
 
-Bronze re-extraído con `python main.py targeted --year 2024 --limit 100` (los datos previos de 2015 y la muestra anterior de 2024 se reemplazaron por una base limpia). Conteos del DW antes vs. ahora:
+Bronze re-extraído con `python app/cli.py targeted --year 2024 --limit 100` (los datos previos de 2015 y la muestra anterior de 2024 se reemplazaron por una base limpia). Conteos del DW antes vs. ahora:
 
 | Tabla | Antes | Ahora |
 |---|---|---|
@@ -807,7 +807,7 @@ Ambos UDFs envuelven cada elemento en `try/except`: si una fila falla, retorna u
 
 **`CODIGO_RED_MAP`**: 34 entradas que mapean códigos SEACE de 3–6 caracteres (p. ej. `RAMOQ`→`RED ASISTENCIAL MOQUEGUA`, `RPREB`→`RED PRESTACIONAL REBAGLIATI`) a los nombres canónicos del Excel de Establecimientos. Resuelve el Gap 2: los códigos en los títulos OCDS no matchean por similitud de caracteres.
 
-### 8.3 Nuevo DDL: `star-schema/EsSalud_Staging_DDL.sql`
+### 8.3 Nuevo DDL: `sql/EsSalud_Staging_DDL.sql`
 
 Esquema de staging para carga atómica a producción:
 
@@ -831,7 +831,7 @@ Esquema de staging para carga atómica a producción:
 |---|---|
 | `app/config/spark_session.py` | Singleton SparkSession (100 líneas) |
 | `app/utils/fuzzy_matcher.py` | Fuzzy matching escalar + Pandas UDFs (260 líneas) |
-| `star-schema/EsSalud_Staging_DDL.sql` | Esquema stg + usp_Load_From_Staging (92 líneas) |
+| `sql/EsSalud_Staging_DDL.sql` | Esquema stg + usp_Load_From_Staging (92 líneas) |
 | `PLAN_MIGRACION_PYSPARK.md` | Plan de migración (156 líneas, reemplaza implementación previa) |
 | `GEMINI.md` | Descripción del proyecto para Gemini (análogo a CLAUDE.md) |
 | `test/conftest.py` | Fixtures compartidos Spark (35 líneas) |
@@ -998,25 +998,25 @@ Los Parquet planos individuales `ocds_flat_<year>.parquet` fueron reemplazados p
 Se agrega una capa de **modelado predictivo** que estima cuántos días tarda un proceso
 de contratación entre la **convocatoria** y la **suscripción del contrato** (`Lead_Time_Total`),
 y publica las predicciones en una nueva tabla Gold para Power BI. **No modifica ningún
-archivo del pipeline existente** (Bronze→Silver→Gold): consume las tablas Parquet de `bi/`.
+archivo del pipeline existente** (Bronze→Silver→Gold): consume las tablas Parquet de `data/mart/`.
 
 ### 9.1 Resumen
 
 - **Modelo:** XGBoost vs. Random Forest, seleccionado por RMSE con validación cruzada
   estratificada de 5 folds por Red Asistencial. **Ganó XGBoost.**
-- **Entregable:** `bi/Pred_Lead_Time.parquet` (9 292 filas) — histórico real + predicho,
+- **Entregable:** `data/mart/Pred_Lead_Time.parquet` (9 292 filas) — histórico real + predicho,
   listo para la Vista Táctica de Power BI.
 - **Calidad:** MAE 15.8 días · mediana del error 3.6 días · **R² ≈ 0.85** · 10/10 pruebas OK.
 
 ### 9.2 ✨ Nueva funcionalidad
 
-- **Predictor de Lead Time contractual** (`mlpredicts/LeadTime_Predictor.ipynb`, 13 celdas):
-  carga y une las 4 tablas relevantes de `bi/`, hace ingeniería de features, EDA (3 gráficos),
+- **Predictor de Lead Time contractual** (`machine_learning/lead_time_predictor/LeadTime_Predictor.ipynb`, 13 celdas):
+  carga y une las 4 tablas relevantes de `data/mart/`, hace ingeniería de features, EDA (3 gráficos),
   compara dos modelos por CV y exporta predicciones para **todos** los registros — incluidos
   los procesos 2024-2025 aún en curso (sin fecha de suscripción), que es el caso de uso.
-- **Nueva tabla Gold `bi/Pred_Lead_Time.parquet`** con lead time real, predicho y residual
+- **Nueva tabla Gold `data/mart/Pred_Lead_Time.parquet`** con lead time real, predicho y residual
   por proceso, para graficar histórico vs. predicho por año, Red y categoría.
-- **Modelo serializado reutilizable** (`mlpredicts/models/best_model.joblib`) cargable con
+- **Modelo serializado reutilizable** (`machine_learning/lead_time_predictor/models/best_model.joblib`) cargable con
   `joblib.load` para predecir sobre nuevos procesos.
 
 ### 9.3 🔧 Correcciones de calidad de datos
@@ -1056,13 +1056,13 @@ archivo del pipeline existente** (Bronze→Silver→Gold): consume las tablas Pa
 
 | Archivo | Descripción |
 |---|---|
-| `mlpredicts/LeadTime_Predictor.ipynb` | Notebook del modelo predictivo (13 celdas, UTF-8) |
-| `mlpredicts/models/best_model.joblib` | Modelo XGBoost (log1p) serializado |
-| `mlpredicts/test_pred_lead_time.py` | 10 pruebas de verificación del entregable |
-| `bi/Pred_Lead_Time.parquet` | Tabla Gold de predicciones (9 292 filas) |
+| `machine_learning/lead_time_predictor/LeadTime_Predictor.ipynb` | Notebook del modelo predictivo (13 celdas, UTF-8) |
+| `machine_learning/lead_time_predictor/models/best_model.joblib` | Modelo XGBoost (log1p) serializado |
+| `machine_learning/lead_time_predictor/test_pred_lead_time.py` | 10 pruebas de verificación del entregable |
+| `data/mart/Pred_Lead_Time.parquet` | Tabla Gold de predicciones (9 292 filas) |
 | `fase4-lead-time-predictivo.md` | Plan de la fase (incluye guía de integración Power BI) |
 
-### 9.6 Esquema de `bi/Pred_Lead_Time.parquet`
+### 9.6 Esquema de `data/mart/Pred_Lead_Time.parquet`
 
 | Columna | Tipo | Notas |
 |---|---|---|
@@ -1078,11 +1078,11 @@ archivo del pipeline existente** (Bronze→Silver→Gold): consume las tablas Pa
 
 ### 9.7 🐛 Pruebas y verificación
 
-Suite `mlpredicts/test_pred_lead_time.py` (**10/10 OK**), ejecutable de forma aislada
+Suite `machine_learning/lead_time_predictor/test_pred_lead_time.py` (**10/10 OK**), ejecutable de forma aislada
 sin Spark ni el `conftest` del proyecto:
 
 ```bash
-PYTHONUTF8=1 .venv/Scripts/python.exe mlpredicts/test_pred_lead_time.py
+PYTHONUTF8=1 .venv/Scripts/python.exe machine_learning/lead_time_predictor/test_pred_lead_time.py
 ```
 
 Valida: existencia de entregables · 9 292 filas y esquema · `Lead_Time_Predicho` sin nulos y ≥ 0 ·
@@ -1097,7 +1097,7 @@ el modelo carga y **reproduce el 100 %** del parquet · sanidad por categoría (
 
 # 2) Ejecutar el notebook de punta a punta (regenera parquet + modelo)
 .venv/Scripts/python.exe -m jupyter nbconvert --to notebook --execute --inplace \
-  --ExecutePreprocessor.kernel_name=essalud mlpredicts/LeadTime_Predictor.ipynb
+  --ExecutePreprocessor.kernel_name=essalud machine_learning/lead_time_predictor/LeadTime_Predictor.ipynb
 ```
 
 > `nbconvert` fija el CWD del kernel a la carpeta del notebook, por lo que `../bi` y `models/`
@@ -1122,15 +1122,15 @@ correo con RUC del proveedor dominante, medicamento y Red Asistencial.
 ### 10.1 ✨ Fase 6 — motor de alertas (`app/services/alerting.py`)
 
 - **Fuente HHI**: réplica pandas exacta de `oro.vw_Matriz_Riesgo_HHI` sobre
-  `bi/*.parquet` (HHI ≥ 8000, dominante ≥ 80%, mismos umbrales del semáforo).
+  `data/mart/*.parquet` (HHI ≥ 8000, dominante ≥ 80%, mismos umbrales del semáforo).
   `Es_Uso_Critico` se deriva de `Restriccion_Uso` del Petitorio (en el DW es
   `BIT DEFAULT 0` sin poblar — la vista SQL nunca dispararía CRITICO).
 - **Fuente Lead Time** (Fase 4): procesos con `Residual > media + 2σ`
   (`--sigma` configurable); resuelve RUC/medicamento vía `ID_Registro`
   (posicional sobre la Fact).
-- **Salidas**: `bi/Alertas.parquet` (esquema de 10 columnas para la Vista
+- **Salidas**: `data/mart/Alertas.parquet` (esquema de 10 columnas para la Vista
   Operativa de Power BI) + correo formal SMTP (texto plano + tabla HTML).
-- **CLI**: `python main.py alert [--source hhi|leadtime|all] [--to] [--limit]
+- **CLI**: `python app/cli.py alert [--source hhi|leadtime|all] [--to] [--limit]
   [--sigma] [--dry-run]`. SMTP en `.env` (Gmail App Password o MailHog local).
 - **Airflow**: nuevo DAG `ocds_alerting` (disparado por `ocds_silver_pipeline`
   tras Gold); `silver_dag` ganó la tarea **`run_synth`** entre Silver y Gold
@@ -1149,14 +1149,14 @@ correo con RUC del proveedor dominante, medicamento y Red Asistencial.
 | `--profile docker` era no-op silencioso (vars `*_DOCKER` vacías) | `.env` del host ahora define `OCDS_DW_*_DOCKER` → `localhost:11433` (puerto publicado del contenedor) |
 | `pyodbc` sin driver del SO en la imagen Airflow | `Dockerfile` instala **msodbcsql18 + unixodbc + mssql-tools18** (repo Microsoft Debian 12) |
 | No existía contenedor MSSQL en el compose | Servicios **`sqlserver`** (mcr 2022, `11433:1433`, healthcheck sqlcmd, volumen persistente) + **`sqlserver-init`** (crea `DW_EsSalud_Adquisiciones`) + **`mailhog`** (SMTP pruebas, UI `:8025`) |
-| Build context gigante (`.venv/`, `data/`, `bi/`) | **`.dockerignore`** whitelist (solo `requirements.txt`) |
+| Build context gigante (`.venv/`, `data/`, `data/mart/`) | **`.dockerignore`** whitelist (solo `requirements.txt`) |
 
 ### 10.3 Archivos nuevos / modificados
 
 **Nuevos**: `app/services/alerting.py` · `dags/alerting_dag.py` ·
 `test/test_alerting.py` · `docs/fase6-powerautomate.md` · `.env.example` ·
 `.env.docker` · `.dockerignore`.
-**Modificados**: `main.py` (subcomando `alert`) · `dags/silver_dag.py`
+**Modificados**: `app/cli.py` (subcomando `alert`) · `dags/silver_dag.py`
 (`run_synth` + `trigger_alerting`) · `app/loaders/dw_loader.py` ·
 `app/config/settings.py` (OCDS_ENV_FILE + SMTP) · `docker-compose.yaml` ·
 `Dockerfile` · `.env` · `README.md`.
@@ -1170,13 +1170,13 @@ correo con RUC del proveedor dominante, medicamento y Red Asistencial.
 
 ### 10.5 ⚠️ Nota operativa — regeneración vía Airflow vs. host
 
-El DAG `ocds_silver_pipeline` regenera `staging_flat` y `bi/` **sobre el volumen
+El DAG `ocds_silver_pipeline` regenera `staging_flat` y `data/mart/` **sobre el volumen
 montado**. El paso `synth` es determinista respecto a la semilla (42) pero
 **sensible al layout de particiones de Spark** (`orderBy(rand(seed)).limit(n)`):
 el contenedor (`local[*]`) muestrea un subconjunto distinto al del host
 (`local[4]`) — el total se mantiene en 9 292, pero los actuals válidos de lead
 time cambian (host: 5 917; contenedor: 6 303). Si se regenera desde el DAG, hay
-que **re-ejecutar el notebook de la Fase 4** (`mlpredicts/LeadTime_Predictor.ipynb`)
+que **re-ejecutar el notebook de la Fase 4** (`machine_learning/lead_time_predictor/LeadTime_Predictor.ipynb`)
 para realinear `Pred_Lead_Time.parquet`/`best_model.joblib` y ajustar el conteo
 esperado en `test_pred_lead_time.py`. El flujo canónico documentado sigue siendo
 el del **host Windows** (silver → synth → gold → notebook → test 10/10).

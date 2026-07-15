@@ -4,7 +4,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 # Ensure the app module can be imported
-sys.path.insert(0, str(Path(__file__).parent.resolve()))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.resolve()))
 
 from app.loaders.dw_loader import create_sqlalchemy_engine
 from app.audit.logger import setup_logger
@@ -16,7 +16,7 @@ def load_parquet_to_sql():
     load_dotenv()
     engine = create_sqlalchemy_engine()
     
-    bi_dir = Path("bi")
+    bi_dir = Path("data/mart")
     
     with engine.begin() as conn:
         from sqlalchemy import text

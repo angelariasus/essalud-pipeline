@@ -73,19 +73,19 @@ x-airflow-common:
     AIRFLOW__CELERY__OPERATION_TIMEOUT: '30'
     # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
     # for other purpose (development, test and especially production usage) build/extend Airflow image.
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:--r /opt/airflow/bi/requirements.txt xgboost scikit-learn nbconvert jupyter_client ipykernel}
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:--r /opt/airflow/project/requirements.txt xgboost scikit-learn nbconvert jupyter_client ipykernel}
     # The following line can be used to set a custom config file, stored in the local config folder
     # If you want to use it, outcomment it and replace airflow.cfg with the name of your config file
     # AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     # ── EsSalud pipeline ──────────────────────────────────────────────
-    # El repo completo se monta en /opt/airflow/bi (incluye el .env de Windows).
+    # El repo completo se monta en /opt/airflow/project (incluye el .env de Windows).
     # OCDS_ENV_FILE apunta settings.py al dotenv del contenedor (.env.docker),
     # evitando que JAVA_HOME/HADOOP_HOME de Windows rompan Spark en Linux.
-    OCDS_ENV_FILE: /opt/airflow/bi/.env.docker
+    OCDS_ENV_FILE: /opt/airflow/project/.env.docker
     # Los workers Python de Spark NO heredan el sys.path del driver (el
     # sys.path.append de los DAGs): sin esto, las UDFs que despickean `app.*`
     # fallan con ModuleNotFoundError dentro del executor.
-    PYTHONPATH: /opt/airflow/bi
+    PYTHONPATH: /opt/airflow/project
     # SMTP de Airflow -> MailHog (notificaciones de fallo de DAGs, opcional).
     AIRFLOW__SMTP__SMTP_HOST: mailhog
     AIRFLOW__SMTP__SMTP_PORT: '1025'
@@ -97,7 +97,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
-    - ${AIRFLOW_PROJ_DIR:-.}:/opt/airflow/bi
+    - ${AIRFLOW_PROJ_DIR:-.}:/opt/airflow/project
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on

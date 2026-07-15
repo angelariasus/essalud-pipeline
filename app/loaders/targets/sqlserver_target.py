@@ -86,6 +86,6 @@ class SqlServerTarget(GoldTarget):
             # y dim_ubigeo del dict son ignoradas por _STAGING_TABLES → no hay
             # conflicto con las tablas que el DDL ya crea y puebla en SQL Server.
             load_all(dims, self.ddl_path)
-            # Export bi/: desde DataFrames en memoria (no requiere leer SQL Server).
+            # Export data/mart/: desde DataFrames en memoria (no requiere leer SQL Server).
             export_dims_to_bi(dims, settings.BI_DIR)
-        logger.info("=== Capa Gold (SQL Server) cargada + export bi/ ===")
+        logger.info("=== Capa Gold (SQL Server) cargada + export data/mart/ ===")

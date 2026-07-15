@@ -10,7 +10,7 @@ Imports de `app.*` diferidos dentro de los callables (Airflow parsea seguido).
 import sys
 from datetime import datetime, timedelta
 
-sys.path.append("/opt/airflow/bi")
+sys.path.append("/opt/airflow/project")
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator

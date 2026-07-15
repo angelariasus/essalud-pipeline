@@ -8,7 +8,7 @@ Subcomandos:
   - gold            : staging_flat -> dimensiones/Fact -> destino (parquet|sqlserver).
   - run-all/pipeline: Bronze -> Silver -> Gold en secuencia.
   - synth           : datos sintéticos (2025 + monto_adicional 2022-2024).
-  - alert           : Fase 6 — alertas HHI/lead time por correo (bi/Alertas.parquet).
+  - alert           : Fase 6 — alertas HHI/lead time por correo (data/mart/Alertas.parquet).
   - clean           : limpia artefactos de una capa (bronze|silver|gold).
 
 Cada subcomando instancia solo lo que necesita (dispatch por comando), de modo
@@ -210,7 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sigma", type=float, default=2.0,
                    help="Umbral de anomalía de lead time en desviaciones (default 2.0)")
     p.add_argument("--dry-run", action="store_true",
-                   help="Construye bi/Alertas.parquet e imprime el correo sin enviarlo")
+                   help="Construye data/mart/Alertas.parquet e imprime el correo sin enviarlo")
     p.set_defaults(func=_handle_alert)
 
     # -- clean --

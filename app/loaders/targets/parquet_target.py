@@ -28,7 +28,7 @@ class ParquetGoldTarget(GoldTarget):
 
     Produce dos salidas:
       - `data/gold/<key>/` : Parquet multi-part por Spark (para lectura programática).
-      - `data/bi/<Tabla>.parquet` : archivo único Pandas (para Power BI / DuckDB directo).
+      - `data/mart/<Tabla>.parquet` : archivo único Pandas (para Power BI / DuckDB directo).
     """
 
     name = "parquet"
@@ -47,6 +47,6 @@ class ParquetGoldTarget(GoldTarget):
             n = df.count()
             df.write.mode("overwrite").parquet(out)
             logger.info(f"  {key}: {n} filas -> {out}")
-        # Export bi/: archivos únicos PascalCase para Power BI / DuckDB.
+        # Export data/mart/: archivos únicos PascalCase para Power BI / DuckDB.
         export_dims_to_bi(dims, settings.BI_DIR)
         logger.info("=== Capa Gold (Parquet) materializada ===")

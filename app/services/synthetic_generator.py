@@ -8,12 +8,12 @@ Motivación (verificado sobre los datos reales):
   - Los contratos OCDS reales traen `amendments: []`, por lo que `Monto_Adicional`
     es 0.0 en TODA la Fact → no hay señal de sobrecosto para BI/ML.
 
-Base de referencia (v2): **`extra-data/CONOSCE_2025_essalud.csv`** — datos reales de
+Base de referencia (v2): **`reference/CONOSCE_2025_essalud.csv`** — datos reales de
 EsSalud 2025 (bienes) ya en el esquema Silver (26 columnas + extras `_`). Es la
 fuente fiel del comportamiento EsSalud: adendas escasas (~0.15%) con ratio
 adicional/contratado ≈ 0.25 (tope legal).
 
-Los archivos xlsx `extra-data/Contratos/CONOSCE_CONTRATOS{anio}_0.xlsx` tienen
+Los archivos xlsx `reference/Contratos/CONOSCE_CONTRATOS{anio}_0.xlsx` tienen
 esquema de administración contractual (24 columnas), no el esquema Silver completo;
 se usan en el enricher (capa Silver, paso 3) para JOIN por contrato, no como fuente
 primaria de filas Silver.

@@ -4,12 +4,12 @@ DAGs de la capa Bronze (ingesta OCDS de EsSalud).
 Los callables importan `app.*` de forma diferida (dentro de la función, no a nivel
 de módulo): Airflow parsea los DAGs con frecuencia y los imports pesados
 (pyspark, boto3, ...) no deben ejecutarse en el parseo. El proyecto se monta en
-`/opt/airflow/bi` (ver docker-compose), por eso se añade al `sys.path`.
+`/opt/airflow/project` (ver docker-compose), por eso se añade al `sys.path`.
 """
 import sys
 from datetime import datetime, timedelta
 
-sys.path.append("/opt/airflow/bi")
+sys.path.append("/opt/airflow/project")
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator

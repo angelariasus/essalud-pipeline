@@ -1,22 +1,22 @@
-# Plan: Fase 4 — Modelado Predictivo del Lead Time Contractual
+# Modelado Predictivo del Lead Time Contractual
 
 ## Contexto
 
-Las Fases 1-3 del pipeline ya están implementadas y verificadas: Bronze→Silver→Gold produce
-7 tablas Parquet en `bi/` (9 292 filas en `Fact_Ordenes_Y_Contratos.parquet`, datos reales
-2022-2023 + sintéticos 2024-2025). Esta fase agrega un modelo regresivo de Lead Time
+Las fases previas del pipeline ya están implementadas y verificadas: Bronze→Silver→Gold produce
+7 tablas Parquet en `data/mart/` (9 292 filas en `Fact_Ordenes_Y_Contratos.parquet`, datos reales
+2022-2023 + sintéticos 2024-2025). Este modelo agrega predicciones de Lead Time
 sin tocar ningún archivo del pipeline existente.
 
 **Objetivo:** predecir cuántos días tardará un proceso de contratación entre convocatoria y
-suscripción del contrato, exponer las predicciones en `bi/Pred_Lead_Time.parquet` y
+suscripción del contrato, exponer las predicciones en `data/mart/Pred_Lead_Time.parquet` y
 documentar la integración en Power BI (Vista Táctica: histórico + predicho).
 
-**Prerrequisito de ejecución:** `python main.py gold` debe haber generado los 7 Parquet en
-`bi/`. El notebook se ejecuta desde `mlpredicts/` con el venv del proyecto (`.venv/`), que
+**Prerrequisito de ejecución:** `python app/cli.py gold` debe haber generado los 7 Parquet en
+`data/mart/`. El notebook se ejecuta desde `machine_learning/lead_time_predictor/` con el venv del proyecto (`.venv/`), que
 ya tiene `xgboost`, `scikit-learn`, `pandas`, `numpy`, `matplotlib`, `seaborn`, `joblib`
-(ver `ml/requirements.txt`).
+(ver `machine_learning/adenda_risk_classifier/requirements.txt`).
 
-## Datos disponibles en `bi/`
+## Datos disponibles en `data/mart/`
 
 | Parquet | Filas | Columnas relevantes para ML |
 |---|---|---|
@@ -34,7 +34,7 @@ ya tiene `xgboost`, `scikit-learn`, `pandas`, `numpy`, `matplotlib`, `seaborn`, 
 ## Archivo a crear
 
 ```
-mlpredicts/
+machine_learning/lead_time_predictor/
 └── LeadTime_Predictor.ipynb     ← único archivo nuevo de código
 models/                          ← creado por el notebook al ejecutar
     best_model.joblib
@@ -42,7 +42,7 @@ models/                          ← creado por el notebook al ejecutar
 
 Y el notebook escribe:
 ```
-bi/Pred_Lead_Time.parquet        ← nueva tabla Gold para Power BI
+data/mart/Pred_Lead_Time.parquet        ← nueva tabla Gold para Power BI
 ```
 
 ## Estructura del notebook (13 celdas)
@@ -185,7 +185,7 @@ importances = best_pipe.named_steps[step].feature_importances_
 plt.tight_layout(); plt.show()
 ```
 
-### Celda 12 — Generación de tabla de predicciones y export a `bi/`
+### Celda 12 — Generación de tabla de predicciones y export a `data/mart/`
 ```python
 # Predice sobre TODOS los registros (también los sin fecha de suscripción)
 df_pred = df.copy()
@@ -204,7 +204,7 @@ pred_table.to_parquet(out, index=False)
 print(f"Exportado: {out}  ({len(pred_table)} registros)")
 ```
 
-**Schema de `bi/Pred_Lead_Time.parquet`:**
+**Schema de `data/mart/Pred_Lead_Time.parquet`:**
 
 | Columna | Tipo | Notas |
 |---|---|---|
@@ -220,7 +220,7 @@ print(f"Exportado: {out}  ({len(pred_table)} registros)")
 ### Celda 13 — Serialización del modelo
 ```python
 joblib.dump(best_pipe, MDL_DIR / "best_model.joblib")
-print("Guardado: mlpredicts/models/best_model.joblib")
+print("Guardado: machine_learning/lead_time_predictor/models/best_model.joblib")
 print("Carga: model = joblib.load('models/best_model.joblib')")
 print("Uso:   pred  = model.predict(X_new)  # mismas columnas CAT+NUM+BIN")
 ```
@@ -228,7 +228,7 @@ print("Uso:   pred  = model.predict(X_new)  # mismas columnas CAT+NUM+BIN")
 ## Integración Power BI — paso a paso
 
 ### 1. Importar tabla de predicciones
-Power BI Desktop → **Obtener datos** → **Parquet** → `<proyecto>/bi/Pred_Lead_Time.parquet`
+Power BI Desktop → **Obtener datos** → **Parquet** → `<proyecto>/data/mart/Pred_Lead_Time.parquet`
 → Renombrar tabla como **"Predicción Lead Time"**
 
 ### 2. Crear relación
@@ -258,7 +258,7 @@ Error Absoluto Medio      = AVERAGEX(
 
 1. Ejecutar todas las celdas sin error → se imprime RMSE de ambos modelos
 2. RMSE razonable: esperar < 150 días en CV (la distribución tiene std=124)
-3. `bi/Pred_Lead_Time.parquet` existe con 9 292 filas; columna `Lead_Time_Predicho` sin nulos
-4. `mlpredicts/models/best_model.joblib` cargable con `joblib.load`
+3. `data/mart/Pred_Lead_Time.parquet` existe con 9 292 filas; columna `Lead_Time_Predicho` sin nulos
+4. `machine_learning/lead_time_predictor/models/best_model.joblib` cargable con `joblib.load`
 5. En Power BI: importar el Parquet, crear relación, añadir las 3 medidas DAX y verificar
    que el gráfico de líneas muestra dos series por año con slicer de Red funcional

@@ -54,22 +54,22 @@ API OCDS (SEACE)
 
 ```
 # Ingesta dirigida por RUC y año
-python main.py targeted --ruc 20131257750 --year 2022 --limit 100
+python app/cli.py targeted --ruc 20131257750 --year 2022 --limit 100
 
 # Ingesta masiva por fuente y período
-python main.py bulk --source SEACE --type JSON --year 2022 --month 6
+python app/cli.py bulk --source SEACE --type JSON --year 2022 --month 6
 ```
 
 ### Archivos clave
 
 | Archivo | Rol |
 |---|---|
-| [main.py](main.py) | CLI de entrada a la capa Bronze |
-| [app/clients/ocds_client.py](app/clients/ocds_client.py) | Cliente HTTP resiliente |
-| [app/pipelines/bronze_layer.py](app/pipelines/bronze_layer.py) | Orquestador de extracción |
-| [app/services/extractors.py](app/services/extractors.py) | Estrategias de extracción (targeted / bulk) |
-| [app/storage/file_manager.py](app/storage/file_manager.py) | Escritura local de JSON |
-| [app/storage/r2_manager.py](app/storage/r2_manager.py) | Escritura opcional en Cloudflare R2 |
+| [main.py](../main.py) | CLI de entrada a la capa Bronze |
+| [app/clients/ocds_client.py](../app/clients/ocds_client.py) | Cliente HTTP resiliente |
+| [app/pipelines/bronze_layer.py](../app/pipelines/bronze_layer.py) | Orquestador de extracción |
+| [app/services/extractors.py](../app/services/extractors.py) | Estrategias de extracción (targeted / bulk) |
+| [app/storage/file_manager.py](../app/storage/file_manager.py) | Escritura local de JSON |
+| [app/storage/r2_manager.py](../app/storage/r2_manager.py) | Escritura opcional en Cloudflare R2 |
 
 ---
 
@@ -81,7 +81,7 @@ python main.py bulk --source SEACE --type JSON --year 2022 --month 6
 
 #### Paso 1 — Carga de maestros (pandas)
 
-Se cargan dos archivos de referencia desde `extra-data/`:
+Se cargan dos archivos de referencia desde `reference/`:
 
 - **Petitorio Farmacológico 2026** (`.xls`): ~1 400 medicamentos con Denominación Común Internacional (DCI), código SAP y especificaciones técnicas.
 - **Relación de Establecimientos Jul 2025** (`.xlsx`): ~800 centros asistenciales con su red, departamento y tipo.
@@ -105,13 +105,13 @@ El grano de salida es **una fila por ítem de licitación** con los campos prove
 
 #### Paso 2.5 — Limpieza con IA (Gemini)
 
-`GeminiCleaner` toma las descripciones únicas del campo `descripcion_item` y las envía en lotes de 50 a la API de Gemini, que las normaliza al nombre genérico DCI (ej: `"PARACETAML TABL 500"` → `"PARACETAMOL 500 MG"`). Los resultados se cachean localmente en `extra-data/gemini_cache.json` para evitar llamadas repetidas.
+`GeminiCleaner` toma las descripciones únicas del campo `descripcion_item` y las envía en lotes de 50 a la API de Gemini, que las normaliza al nombre genérico DCI (ej: `"PARACETAML TABL 500"` → `"PARACETAMOL 500 MG"`). Los resultados se cachean localmente en `reference/gemini_cache.json` para evitar llamadas repetidas.
 
 Requiere configurar `GEMINI_API_KEY` en el `.env`. Si no está configurada, el pipeline continúa sin limpiar.
 
 #### Paso 3 — Enriquecimiento CONOSCE (Spark)
 
-`conosce_enricher.py` carga los archivos Excel de `extra-data/Contratos/` (un xlsx por año disponible: 2022–2025, ~63 000 filas en total) y hace un LEFT JOIN sobre `(codigoconvocatoria, n_cod_contrato)`. Este paso añade las columnas que la API OCDS no reporta:
+`conosce_enricher.py` carga los archivos Excel de `reference/Contratos/` (un xlsx por año disponible: 2022–2025, ~63 000 filas en total) y hace un LEFT JOIN sobre `(codigoconvocatoria, n_cod_contrato)`. Este paso añade las columnas que la API OCDS no reporta:
 
 | Columna | Descripción |
 |---|---|
@@ -137,14 +137,14 @@ El Parquet resultante se escribe en `data/silver/staging_flat/` con **overwrite 
 
 | Archivo | Rol |
 |---|---|
-| [app/pipelines/silver_layer.py](app/pipelines/silver_layer.py) | Orquestador Silver (4 pasos) |
-| [app/services/ocds_flattener.py](app/services/ocds_flattener.py) | Aplanamiento Spark + reader de staging |
-| [app/services/ai_cleaner.py](app/services/ai_cleaner.py) | Limpieza con Gemini API |
-| [app/services/conosce_enricher.py](app/services/conosce_enricher.py) | Enriquecimiento con Excel CONOSCE |
-| [app/services/dim_resolver.py](app/services/dim_resolver.py) | Dimensiones + Fact con Spark |
-| [app/utils/fuzzy_matcher.py](app/utils/fuzzy_matcher.py) | Pandas UDFs de fuzzy match (RapidFuzz) |
-| [app/loaders/master_loader.py](app/loaders/master_loader.py) | Carga de Petitorio y Establecimientos |
-| [app/config/spark_session.py](app/config/spark_session.py) | SparkSession singleton |
+| [app/pipelines/silver_layer.py](../app/pipelines/silver_layer.py) | Orquestador Silver (4 pasos) |
+| [app/services/ocds_flattener.py](../app/services/ocds_flattener.py) | Aplanamiento Spark + reader de staging |
+| [app/services/ai_cleaner.py](../app/services/ai_cleaner.py) | Limpieza con Gemini API |
+| [app/services/conosce_enricher.py](../app/services/conosce_enricher.py) | Enriquecimiento con Excel CONOSCE |
+| [app/services/dim_resolver.py](../app/services/dim_resolver.py) | Dimensiones + Fact con Spark |
+| [app/utils/fuzzy_matcher.py](../app/utils/fuzzy_matcher.py) | Pandas UDFs de fuzzy match (RapidFuzz) |
+| [app/loaders/master_loader.py](../app/loaders/master_loader.py) | Carga de Petitorio y Establecimientos |
+| [app/config/spark_session.py](../app/config/spark_session.py) | SparkSession singleton |
 
 ---
 
@@ -195,11 +195,11 @@ Dim_Entidad_Compradora ──┼──── Fact_Ordenes_Y_Contratos ───�
 
 | Archivo | Rol |
 |---|---|
-| [app/pipelines/gold_layer.py](app/pipelines/gold_layer.py) | Orquestador Gold (lee staging → dims → target) |
-| [app/loaders/targets/](app/loaders/targets/) | Abstracción de destinos: `ParquetGoldTarget`, `SqlServerTarget` |
-| [app/loaders/dw_loader.py](app/loaders/dw_loader.py) | Escritura JDBC + ejecución del stored procedure |
-| [star-schema/EsSalud_StarSchema_DDL.sql](star-schema/EsSalud_StarSchema_DDL.sql) | DDL del modelo estrella en SQL Server |
-| [star-schema/EsSalud_Staging_DDL.sql](star-schema/EsSalud_Staging_DDL.sql) | DDL del esquema staging + stored procedure |
+| [app/pipelines/gold_layer.py](../app/pipelines/gold_layer.py) | Orquestador Gold (lee staging → dims → target) |
+| [app/loaders/targets/](../app/loaders/targets/) | Abstracción de destinos: `ParquetGoldTarget`, `SqlServerTarget` |
+| [app/loaders/dw_loader.py](../app/loaders/dw_loader.py) | Escritura JDBC + ejecución del stored procedure |
+| [sql/EsSalud_StarSchema_DDL.sql](../sql/EsSalud_StarSchema_DDL.sql) | DDL del modelo estrella en SQL Server |
+| [sql/EsSalud_Staging_DDL.sql](../sql/EsSalud_Staging_DDL.sql) | DDL del esquema staging + stored procedure |
 
 ---
 
@@ -246,64 +246,64 @@ defecto es **Parquet** (`data/gold/`), sin necesidad de SQL Server.
 # ──────────────────────────────────────────────────────────────────
 # FLUJO COMPLETO (Bronze → Silver → Gold)
 # ──────────────────────────────────────────────────────────────────
-python main.py run-all                                  # Parquet Gold (default)
-python main.py run-all --target sqlserver --profile local  # carga al DW
+python app/cli.py run-all                                  # Parquet Gold (default)
+python app/cli.py run-all --target sqlserver --profile local  # carga al DW
 
 # ──────────────────────────────────────────────────────────────────
 # POR CAPAS (flujo recomendado para desarrollo)
 # ──────────────────────────────────────────────────────────────────
 
 # 1. Bronze — ingesta por año (--limit 0 = todos los registros)
-python main.py bronze --years 2022 2023 2024 2025
-python main.py bronze --years 2024 --limit 50         # prueba rápida
+python app/cli.py bronze --years 2022 2023 2024 2025
+python app/cli.py bronze --years 2024 --limit 50         # prueba rápida
 
 # 2. Silver — aplana + limpia IA + enriquece CONOSCE → staging_flat
-python main.py silver                                  # todos los años del default
-python main.py silver --years 2022 2023
+python app/cli.py silver                                  # todos los años del default
+python app/cli.py silver --years 2022 2023
 
 # 3. Gold — lee staging_flat → dimensiones → destino
-python main.py gold                                    # Parquet en data/gold/
-python main.py gold --target sqlserver                 # carga DW (Star Schema)
-python main.py gold --target sqlserver --profile local # equivalente a anterior
+python app/cli.py gold                                    # Parquet en data/gold/
+python app/cli.py gold --target sqlserver                 # carga DW (Star Schema)
+python app/cli.py gold --target sqlserver --profile local # equivalente a anterior
 
 # ──────────────────────────────────────────────────────────────────
 # DATOS SINTÉTICOS (comando separado; corre después de silver)
 # ──────────────────────────────────────────────────────────────────
 # Genera datos para enriquecer staging_flat antes de correr gold:
-#   2025 → ~2 176 filas reales de EsSalud desde extra-data/CONOSCE_2025_essalud.csv
+#   2025 → ~2 176 filas reales de EsSalud desde reference/CONOSCE_2025_essalud.csv
 #   2024 → boost a 2 370 filas (58 reales + bootstrap del Silver real)
 #   2022/2023 → añade monto_adicional sintético (ocurrencia ~15%, ratio real ≤25%)
-python main.py synth                                   # defaults
-python main.py synth --adicional-rate 0.2              # más adendas para señal ML
-python main.py synth --n-2025 2000 --n-2024 2200       # ajuste de conteos
+python app/cli.py synth                                   # defaults
+python app/cli.py synth --adicional-rate 0.2              # más adendas para señal ML
+python app/cli.py synth --n-2025 2000 --n-2024 2200       # ajuste de conteos
 
 # Luego cargar Gold (consume los 9 292 registros totales):
-python main.py gold --target sqlserver
+python app/cli.py gold --target sqlserver
 
 # ──────────────────────────────────────────────────────────────────
 # RECONSTRUCCIÓN / LIMPIEZA POR CAPA
 # ──────────────────────────────────────────────────────────────────
-python main.py silver --rebuild                        # limpia staging y reprocesa
-python main.py gold   --rebuild --target sqlserver     # re-DDL idempotente + recarga
-python main.py clean  silver                           # borra data/silver/staging_flat
-python main.py clean  gold --target parquet            # borra data/gold/
-python main.py clean  bronze --yes                     # borra Bronze (requiere --yes)
+python app/cli.py silver --rebuild                        # limpia staging y reprocesa
+python app/cli.py gold   --rebuild --target sqlserver     # re-DDL idempotente + recarga
+python app/cli.py clean  silver                           # borra data/silver/staging_flat
+python app/cli.py clean  gold --target parquet            # borra data/gold/
+python app/cli.py clean  bronze --yes                     # borra Bronze (requiere --yes)
 
 # ──────────────────────────────────────────────────────────────────
 # COMPATIBILIDAD HISTÓRICA (sin cambios respecto a versiones previas)
 # ──────────────────────────────────────────────────────────────────
-python main.py targeted --year 2022 --limit 100
-python main.py bulk --source SEACE --year 2022 --month 6
+python app/cli.py targeted --year 2022 --limit 100
+python app/cli.py bulk --source SEACE --year 2022 --month 6
 ```
 
 | Destino Gold | Flag | Produce | Requiere |
 |---|---|---|---|
-| Parquet (default) | `--target parquet` | `data/gold/` + **`data/bi/` (6 tablas)** | nada (solo Spark) |
-| SQL Server local | `--target sqlserver --profile local` | esquema `oro` (6 tablas) **+ `bi/` Parquet** | instancia en `localhost` |
+| Parquet (default) | `--target parquet` | `data/gold/` + **`data/data/mart/` (6 tablas)** | nada (solo Spark) |
+| SQL Server local | `--target sqlserver --profile local` | esquema `oro` (6 tablas) **+ `data/mart/` Parquet** | instancia en `localhost` |
 | SQL Server Docker | `--target sqlserver --profile docker` | igual que local | vars `*_DOCKER` en `.env` |
 
-> **`data/bi/` en ambos destinos**: `python main.py gold` y
-> `gold --target sqlserver` producen los mismos 6 archivos en `data/bi/`
+> **`data/data/mart/` en ambos destinos**: `python app/cli.py gold` y
+> `gold --target sqlserver` producen los mismos 6 archivos en `data/data/mart/`
 > (`Dim_Tiempo.parquet`, `Dim_Ubigeo.parquet`, `Dim_Entidad_Compradora.parquet`,
 > `Dim_Medicamento.parquet`, `Dim_Proveedor.parquet`, `Fact_Ordenes_Y_Contratos.parquet`).
 > `Dim_Tiempo` (spine 2010–2030, 7 671 filas) y `Dim_Ubigeo` (25 dptos. + centinela)
@@ -314,7 +314,7 @@ python main.py bulk --source SEACE --year 2022 --month 6
 > (el `anio_fiscal` sale de la fecha de convocatoria), por lo que Silver casi no
 > produce filas para 2024 (58) ni 2025 (0); además los contratos OCDS reales no
 > traen adendas (`Monto_Adicional = 0`). El comando `synth` genera datos
-> sintéticos **fieles** a partir de **`extra-data/CONOSCE_2025_essalud.csv`** (data
+> sintéticos **fieles** a partir de **`reference/CONOSCE_2025_essalud.csv`** (data
 > real de EsSalud 2025, bienes):
 > - **2025**: se extrae del CSV (~2 176 filas), conservando las adendas reales.
 > - **2024**: se lleva a 2 370 filas (reales + bootstrap del Silver real, con ocids
@@ -328,7 +328,7 @@ python main.py bulk --source SEACE --year 2022 --month 6
 
 ---
 
-## Módulo ML (`ml/`)
+## Módulo ML (`machine_learning/adenda_risk_classifier/`)
 
 Proyecto independiente que consume los datos del DW para entrenar modelos GBDT de gestión de riesgo en adquisiciones. Incluye una aplicación Streamlit para visualización de resultados.
 
@@ -374,16 +374,16 @@ essalud-pipeline/
 │       ├── fuzzy_matcher.py    # Pandas UDFs RapidFuzz (medicamentos + redes)
 │       └── cleaner.py          # Limpieza por capa (bronze/silver/gold)
 ├── dags/               # DAGs de Apache Airflow (orquestación Docker)
-├── extra-data/
+├── reference/
 │   ├── Contratos/          # xlsx CONOSCE por año (2022–2025, ~63 000 filas)
 │   ├── CONOSCE_2025_essalud.csv  # Resumen EsSalud 2025 bienes (fuente synth 2025)
 │   └── gemini_cache.json   # Caché local de respuestas Gemini
-├── ml/                 # Modelos GBDT + app Streamlit (XGBoost/LightGBM/CatBoost)
-├── star-schema/
+├── machine_learning/adenda_risk_classifier/                 # Modelos GBDT + app Streamlit (XGBoost/LightGBM/CatBoost)
+├── sql/
 │   ├── EsSalud_StarSchema_DDL.sql  # Modelo estrella (DROP+CREATE idempotente)
 │   └── EsSalud_Staging_DDL.sql     # stg.* + oro.usp_Load_From_Staging (SP atómico)
 ├── test/               # Suite pytest (unitario + integración Spark)
-├── main.py             # CLI Medallion (todos los subcomandos)
+├── app/cli.py             # CLI Medallion (todos los subcomandos)
 ├── Dockerfile          # Imagen Airflow + Java 17
 ├── docker-compose.yaml # Stack completo (Airflow + Redis + PostgreSQL)
 └── .env                # Variables de entorno locales (no versionado)
@@ -394,26 +394,26 @@ essalud-pipeline/
 ## Capas aditivas (2026-07)
 
 Dos capas de consumo que **no modifican** el pipeline Bronze→Silver→Gold; ambas
-leen los Parquet de `bi/`:
+leen los Parquet de `data/mart/`:
 
-### Fase 4 — ML de Lead Time (`mlpredicts/`)
+### Modelo Predictivo de Lead Time (`machine_learning/lead_time_predictor/`)
 
 XGBoost (objetivo en log1p) que predice los días entre convocatoria y suscripción
-por ítem. Entrena desde `bi/Fact...parquet` + dims y publica
-`bi/Pred_Lead_Time.parquet` (real vs. predicho + residual, clave `ID_Registro`).
-Detalle en `fase4-lead-time-predictivo.md`.
+por ítem. Entrena desde `data/mart/Fact...parquet` + dims y publica
+`data/mart/Pred_Lead_Time.parquet` (real vs. predicho + residual, clave `ID_Registro`).
+Detalle en `modelo-predictivo.md`.
 
-### Fase 6 — Alertas operativas (`app/services/alerting.py`)
+### Alertas Operativas (`app/services/alerting.py`)
 
 Motor pandas (sin Spark) con dos fuentes de riesgo:
 
-- **HHI**: réplica de la vista `oro.vw_Matriz_Riesgo_HHI` sobre `bi/` — mercados
+- **HHI**: réplica de la vista `oro.vw_Matriz_Riesgo_HHI` sobre `data/mart/` — mercados
   (año × entidad × medicamento) con HHI ≥ 8000, medicamento de uso restringido y
   proveedor dominante ≥ 80 %.
-- **Lead Time anómalo**: residual de la Fase 4 > media + 2σ.
+- **Lead Time anómalo**: residual del modelo predictivo > media + 2σ.
 
-Consolida `bi/Alertas.parquet` y envía correo formal (RUC dominante + medicamento
-+ Red Asistencial) por SMTP. CLI: `python main.py alert`; en Airflow, el DAG
+Consolida `data/mart/Alertas.parquet` y envía correo formal (RUC dominante + medicamento
++ Red Asistencial) por SMTP. CLI: `python app/cli.py alert`; en Airflow, el DAG
 `ocds_alerting` corre tras Gold (el correo cae en **MailHog** en el stack local).
 
 ### Stack Docker ampliado
@@ -424,4 +424,4 @@ UI :8025). Tres ajustes críticos del entorno contenedor (ver CHANGELOG §10.6):
 `OCDS_ENV_FILE=.env.docker` (aísla el `.env` de Windows), `PYTHONPATH=/opt/airflow/bi`
 (los executors de Spark no heredan `sys.path`) y `AIRFLOW__CELERY__OPERATION_TIMEOUT=30`.
 
-**Runbook completo del equipo:** `docs/guia-ejecucion.md`.
+**Runbook completo del equipo:** [`guia-ejecucion.md`](guia-ejecucion.md).

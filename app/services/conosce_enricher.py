@@ -39,7 +39,7 @@ _DROP_PREFIXED = [
 
 
 def _load_conosce_pandas():
-    """Carga y concatena todos los xlsx CONOSCE de `extra-data/Contratos/`."""
+    """Carga y concatena todos los xlsx CONOSCE de `reference/Contratos/`."""
     import pandas as pd
 
     files = sorted(_glob.glob(str(CONOSCE_DIR / "*.xlsx")))

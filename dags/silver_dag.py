@@ -50,18 +50,6 @@ def _run_silver(**context):
     SilverPipeline().run_silver(years=years)
 
 
-def _run_synth(**context):
-    """Genera los sintéticos (2025 CSV + boost 2024 + adendas) sobre staging_flat."""
-    from app.services.synthetic_generator import run_synthetic
-
-    dag_run = context.get("dag_run")
-    conf = (dag_run.conf if dag_run and dag_run.conf else {}) or {}
-    if conf.get("skip_synth"):
-        print("skip_synth=true en dag_run.conf; se omite la generación sintética.")
-        return
-    run_synthetic(adicional_p=conf.get("adicional_rate"))
-
-
 def _run_gold(**context):
     """Ejecuta GoldPipeline (staging_flat -> dimensiones -> destino)."""
     from app.pipelines.gold_layer import GoldPipeline
@@ -99,11 +87,6 @@ with DAG(
         python_callable=_run_silver,
     )
 
-    run_synth = PythonOperator(
-        task_id="run_synth",
-        python_callable=_run_synth,
-    )
-
     run_gold = PythonOperator(
         task_id="run_gold_pipeline",
         python_callable=_run_gold,
@@ -114,4 +97,4 @@ with DAG(
         trigger_dag_id="ocds_alerting",
     )
 
-    resolve_years >> run_silver >> run_synth >> run_gold >> trigger_alerting
+    resolve_years >> run_silver >> run_gold >> trigger_alerting

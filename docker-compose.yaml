@@ -73,7 +73,7 @@ x-airflow-common:
     AIRFLOW__CELERY__OPERATION_TIMEOUT: '30'
     # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
     # for other purpose (development, test and especially production usage) build/extend Airflow image.
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:--r /opt/airflow/bi/requirements.txt xgboost scikit-learn nbconvert jupyter_client ipykernel}
     # The following line can be used to set a custom config file, stored in the local config folder
     # If you want to use it, outcomment it and replace airflow.cfg with the name of your config file
     # AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
@@ -152,6 +152,27 @@ services:
       - "8025:8025"        # UI web: http://localhost:8025
       - "1025:1025"        # SMTP
     restart: always
+
+  # ── Microservicio Node.js para Notificaciones ──
+  notifier-backend:
+    build: ./notifier-backend
+    ports:
+      - "3000:3000"
+    environment:
+      - DB_SERVER=host.docker.internal
+      - DB_PORT=1433
+      - DB_USER=sa
+      - DB_PASSWORD=EsSalud2024!
+      - DB_NAME=DW_EsSalud_Adquisiciones
+      - SMTP_HOST=mailhog
+      - SMTP_PORT=1025
+      - SMTP_FROM=alertas@essalud-pipeline.local
+      - SMTP_TO=abastecimiento@essalud-pipeline.local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+    depends_on:
+      - mailhog
 
   postgres:
     image: postgres:13

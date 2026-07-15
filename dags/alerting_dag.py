@@ -28,34 +28,43 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
-
-def _run_alerts(**context):
-    from app.services.alerting import send_alerts
-
-    dag_run = context.get("dag_run")
-    conf = (dag_run.conf if dag_run and dag_run.conf else {}) or {}
-    n = send_alerts(
-        source=conf.get("source", "all"),
-        to=conf.get("to"),
-        dry_run=bool(conf.get("dry_run", False)),
-    )
-    print(f"Alertas notificadas: {n}")
-
+def _build_alerts_parquet(**context):
+    from app.services.alerting import build_alertas
+    build_alertas(save=True)
+    print("Alertas.parquet generado exitosamente.")
 
 with DAG(
     "ocds_alerting",
     default_args=default_args,
-    description=(
-        "Fase 6: consolida alertas (HHI critico + lead time anomalo) en "
-        "bi/Alertas.parquet y notifica por correo al area de abastecimiento."
-    ),
-    schedule_interval=None,  # lo dispara ocds_silver_pipeline al terminar Gold
+    description="Fase 6: Predicciones ML, Consolidación de Alertas, Carga a SQL y Notificación Node.js.",
+    schedule_interval=None,
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=["ocds", "alerting", "fase6"],
 ) as dag:
 
-    run_alerts = PythonOperator(
-        task_id="run_alerts",
-        python_callable=_run_alerts,
+    from airflow.operators.bash import BashOperator
+    from airflow.operators.python import PythonOperator
+
+    run_ml_predict = BashOperator(
+        task_id="run_ml_predict",
+        # Airflow monta la raiz del proyecto en /opt/airflow/bi
+        bash_command="cd /opt/airflow/bi && jupyter nbconvert --to notebook --execute mlpredicts/LeadTime_Predictor.ipynb",
     )
+
+    run_build_alerts = PythonOperator(
+        task_id="run_build_alerts",
+        python_callable=_build_alerts_parquet,
+    )
+
+    run_load_sql = BashOperator(
+        task_id="run_load_sql",
+        bash_command="cd /opt/airflow/bi && python load_ml_to_sql.py",
+    )
+
+    run_notify_nodejs = BashOperator(
+        task_id="run_notify_nodejs",
+        bash_command="curl -X POST http://notifier-backend:3000/api/notify",
+    )
+
+    run_ml_predict >> run_build_alerts >> run_load_sql >> run_notify_nodejs

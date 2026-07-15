@@ -78,21 +78,21 @@ El pipeline utiliza archivos base para enriquecer la data extraída:
 ```text
 essalud-pipeline/
 ├── app/                    # Código fuente principal (extractores, pipelines, servicios)
+│   ├── cli.py              # CLI Medallion principal
+│   └── scripts/            # Scripts utilitarios (ej. load_ml_to_sql.py)
+├── assets/                 # Recursos gráficos y diagramas
 ├── dags/                   # DAGs de Apache Airflow
+├── data/                   
+│   └── mart/               # Capa Gold exportada a Parquet (BI / Reportes)
 ├── docs/                   # Documentación detallada del framework
-│   ├── alertas-automatizadas.md 
-│   ├── arquitectura.md         
-│   ├── diccionario-datos.md    
-│   ├── guia-desarrollo.md      
-│   ├── guia-ejecucion.md       
-│   └── modelo-predictivo.md    
-├── reference/             # Excel de referencia y datos base (Lookups)
-├── machine_learning/lead_time_predictor/             # Modelo predictivo de Lead Time (Notebooks XGBoost)
-├── sql/            # DDL del modelo estrella en SQL Server
+├── machine_learning/       # Modelos predictivos y aplicaciones de IA
+│   ├── adenda_risk_classifier/  # Clasificador de riesgo de adendas (Streamlit)
+│   └── lead_time_predictor/     # Modelo XGBoost de Lead Time en días
+├── reference/              # Excel de referencia y datos base (Lookups)
+├── sql/                    # DDL del modelo estrella en SQL Server
 ├── test/                   # Suite de pruebas unitarias y de integración (Pytest)
 ├── docker-compose.yaml     # Stack: Airflow + SQL Server DW + MailHog
-├── requirements.txt        # Dependencias de producción
-└── app/cli.py                 # CLI Medallion principal
+└── requirements.txt        # Dependencias de producción
 ```
 
 ---

@@ -51,11 +51,19 @@ def get_spark_session(app_name: Optional[str] = None) -> SparkSession:
         os.environ.get("PYSPARK_DRIVER_PYTHON") or sys.executable
     )
 
+    # En Windows, Java necesita encontrar hadoop.dll en el PATH
+    if os.name == "nt":
+        hadoop_home = os.environ.get("HADOOP_HOME", "")
+        if hadoop_home:
+            hadoop_bin = os.path.join(hadoop_home, "bin")
+            if hadoop_bin not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = f"{hadoop_bin};{os.environ.get('PATH', '')}"
+
     builder = (
         SparkSession.builder
         .appName(app_name or settings.SPARK_APP_NAME)
         .master(settings.SPARK_MASTER)
-        .config("spark.sql.execution.arrow.pyspark.enabled", "true")
+        .config("spark.sql.execution.arrow.pyspark.enabled", "false")
         .config("spark.sql.execution.arrow.pyspark.fallback.enabled", "true")
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.shuffle.partitions", settings.SPARK_SHUFFLE_PARTITIONS)

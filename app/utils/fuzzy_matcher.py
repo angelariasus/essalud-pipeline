@@ -176,14 +176,7 @@ def match_red_asistencial(candidato: Optional[str], red_choices: List[str]) -> d
     return {"red": None, "score": score}
 
 
-# ── Pandas UDFs vectorizados (Apache Arrow) ──────────────────────────────────
-# rapidfuzz es C++ monohilo; en Spark se vectoriza por particiones vía Arrow.
-# Cada UDF recorre la Serie reusando la lógica escalar (resultados idénticos) y
-# encapsula cada elemento en try/except: ante un fallo retorna un "sentinel"
-# (metodo='ERROR: ...') en vez de abortar el Job de Spark (graceful degradation).
-#
-# Los maestros (DENOMINACION_DCI_NORM, RED_NORM) se envían como variables
-# Broadcast a los nodos; las factories capturan ese Broadcast en el closure.
+from pyspark.sql import functions as F
 
 MED_MATCH_SCHEMA = StructType([
     StructField("dci", StringType()),
@@ -199,73 +192,36 @@ RED_MATCH_SCHEMA = StructType([
 
 def make_match_medicamento_udf(broadcast_choices):
     """
-    Devuelve un pandas_udf que clasifica descripciones SEACE contra el Petitorio.
-
-    Args:
-        broadcast_choices: Broadcast de la lista DENOMINACION_DCI_NORM (normalizada).
-
-    Returns:
-        pandas_udf (Serie[str] -> DataFrame[dci, score, metodo]).
+    Devuelve un UDF estándar (PySpark) que clasifica descripciones SEACE contra el Petitorio.
     """
-
-    @pandas_udf(MED_MATCH_SCHEMA)
-    def _udf(descripciones: pd.Series) -> pd.DataFrame:
+    @F.udf(MED_MATCH_SCHEMA)
+    def _udf(desc: str):
+        if desc is None:
+            return (None, 0.0, "DUDOSO")
         choices = broadcast_choices.value
-        dcis: List[Optional[str]] = []
-        scores: List[float] = []
-        metodos: List[str] = []
-        for desc in descripciones:
-            try:
-                res = match_medicamento(desc, choices)
-                dcis.append(res["dci"])
-                scores.append(float(res["score"]))
-                metodos.append(res["metodo"])
-            except Exception as exc:  # noqa: BLE001 - fail-safe por elemento
-                dcis.append(None)
-                scores.append(0.0)
-                metodos.append(f"ERROR: {exc}")
-        # dtype=object explícito en las columnas string: pandas 3.0 infiere por
-        # defecto el dtype `str` respaldado por Arrow `large_string`, que no
-        # coincide con el `string` esperado por el esquema Spark del UDF y
-        # crashea el worker (ArrowInvalid: large_string vs string).
-        return pd.DataFrame({
-            "dci": pd.Series(dcis, dtype=object),
-            "score": pd.Series(scores, dtype="float64"),
-            "metodo": pd.Series(metodos, dtype=object),
-        })
+        try:
+            res = match_medicamento(desc, choices)
+            return (res["dci"], float(res["score"]), res["metodo"])
+        except Exception as exc:
+            return (None, 0.0, f"ERROR: {exc}")
 
     return _udf
 
 
 def make_match_red_udf(broadcast_choices):
     """
-    Devuelve un pandas_udf que resuelve candidatos de Red contra el maestro.
-
-    Args:
-        broadcast_choices: Broadcast de la lista RED_NORM canónica.
-
-    Returns:
-        pandas_udf (Serie[str] -> DataFrame[red, score]).
+    Devuelve un UDF estándar (PySpark) que resuelve candidatos de Red contra el maestro.
     """
-
-    @pandas_udf(RED_MATCH_SCHEMA)
-    def _udf(candidatos: pd.Series) -> pd.DataFrame:
+    @F.udf(RED_MATCH_SCHEMA)
+    def _udf(cand: str):
+        if cand is None:
+            return (None, 0.0)
         choices = broadcast_choices.value
-        reds: List[Optional[str]] = []
-        scores: List[float] = []
-        for cand in candidatos:
-            try:
-                res = match_red_asistencial(cand, choices)
-                reds.append(res["red"])
-                scores.append(float(res["score"]))
-            except Exception:  # noqa: BLE001 - fail-safe por elemento
-                reds.append(None)
-                scores.append(0.0)
-        # dtype=object explícito: ver nota en make_match_medicamento_udf
-        # (pandas 3.0 -> large_string incompatible con el esquema Spark).
-        return pd.DataFrame({
-            "red": pd.Series(reds, dtype=object),
-            "score": pd.Series(scores, dtype="float64"),
-        })
+        try:
+            res = match_red_asistencial(cand, choices)
+            return (res["red"], float(res["score"]))
+        except Exception:
+            return (None, 0.0)
 
     return _udf
+

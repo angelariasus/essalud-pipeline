@@ -2,10 +2,11 @@ import pytest
 import requests
 
 API_BASE = "https://contratacionesabiertas.oece.gob.pe/api/v1"
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
 
 def get_first_record_buyer(params: dict) -> str | None:
-    r = requests.get(f"{API_BASE}/records", params=params, timeout=10)
+    r = requests.get(f"{API_BASE}/records", params=params, headers=HEADERS, timeout=10)
     r.raise_for_status()
     data = r.json()
     records = data.get("records", [])
@@ -15,13 +16,13 @@ def get_first_record_buyer(params: dict) -> str | None:
 
 
 def test_api_responds():
-    r = requests.get(f"{API_BASE}/records", params={"limit": 1}, timeout=10)
+    r = requests.get(f"{API_BASE}/records", params={"limit": 1}, headers=HEADERS, timeout=10)
     assert r.status_code == 200
 
 
 def test_api_returns_records():
     """El endpoint /records devuelve una lista de registros."""
-    r = requests.get(f"{API_BASE}/records", params={"limit": 5}, timeout=10)
+    r = requests.get(f"{API_BASE}/records", params={"limit": 5}, headers=HEADERS, timeout=10)
     r.raise_for_status()
     data = r.json()
     records = data.get("records", [])
@@ -43,7 +44,7 @@ def test_first_record_has_buyer():
 
 def test_main_procurement_category_exists():
     """Cada record debe tener mainProcurementCategory dentro de tender."""
-    r = requests.get(f"{API_BASE}/records", params={"limit": 10}, timeout=10)
+    r = requests.get(f"{API_BASE}/records", params={"limit": 10}, headers=HEADERS, timeout=10)
     r.raise_for_status()
     data = r.json()
     for record in data.get("records", []):
@@ -56,7 +57,7 @@ def test_main_procurement_category_exists():
 def test_essalud_records_have_known_category():
     """Los records de EsSalud visibles deben tener una categoría válida de OCDS
     (ya NO se restringe a 'goods': se incluye toda la contratación)."""
-    r = requests.get(f"{API_BASE}/records", params={"limit": 50}, timeout=10)
+    r = requests.get(f"{API_BASE}/records", params={"limit": 50}, headers=HEADERS, timeout=10)
     r.raise_for_status()
     data = r.json()
     essalud_records = []
@@ -75,7 +76,7 @@ def test_essalud_records_have_known_category():
 
 def test_links_next_exists():
     """La respuesta debe incluir links.next para paginación."""
-    r = requests.get(f"{API_BASE}/records", params={"limit": 1}, timeout=10)
+    r = requests.get(f"{API_BASE}/records", params={"limit": 1}, headers=HEADERS, timeout=10)
     r.raise_for_status()
     data = r.json()
     links = data.get("links", {})

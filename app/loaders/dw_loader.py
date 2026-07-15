@@ -37,7 +37,7 @@ _STAGING_TABLES = {
 }
 
 # DDL de staging + stored procedure (junto al DDL del star schema).
-STAGING_DDL_PATH = settings.PROJECT_ROOT / "star-schema" / "EsSalud_Staging_DDL.sql"
+STAGING_DDL_PATH = settings.PROJECT_ROOT / "sql" / "EsSalud_Staging_DDL.sql"
 
 
 def create_sqlalchemy_engine() -> Engine:

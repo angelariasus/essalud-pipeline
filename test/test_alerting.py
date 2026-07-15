@@ -215,7 +215,7 @@ def test_build_alertas_schema(monkeypatch, tmp_path):
 
 def test_cli_alert_handler(monkeypatch):
     # El subcomando alert debe delegar en send_alerts con los args del parser.
-    import main as cli
+    from app import cli
     called = {}
 
     def fake_send_alerts(**kw):

@@ -45,11 +45,11 @@ El análisis de las contrataciones públicas es crucial para garantizar el abast
 
 ![Diagrama de Arquitectura](assets/diagram.png)
 
-El flujo de datos sigue un orden canónico orquestado por **Apache Airflow**:
+### Orquestación de Tareas (Airflow)
 
-```
-Bronze (API Requests) ──► Silver (PySpark ETL) ──► Gold (Star Schema JDBC)
-```
+El flujo de datos sigue un orden canónico y automatizado orquestado por **Apache Airflow**:
+
+![Orquestación de Airflow](assets/airflow.png)
 
 ### Esquema Estrella (Capa Gold)
 
